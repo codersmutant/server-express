@@ -166,11 +166,6 @@ function wppps_activate() {
     
     dbDelta($sql);
     
-    $result = $wpdb->query("SHOW COLUMNS FROM {$log_table} LIKE 'transaction_type'");
-if (!$result) {
-    $wpdb->query("ALTER TABLE {$log_table} ADD COLUMN transaction_type varchar(20) NOT NULL DEFAULT 'standard'");
-}
-    
     // Add plugin options
     add_option('wppps_paypal_client_id', '');
     add_option('wppps_paypal_client_secret', '');
@@ -1053,6 +1048,173 @@ function wppps_delete_transaction_handler() {
 add_action('wp_ajax_wppps_delete_transaction', 'wppps_delete_transaction_handler');
 
 
+
+
+/**
+ * Process Express Checkout webhook from PayPal for shipping address changes
+ */
+function wppps_process_express_shipping_webhook($request) {
+    error_log('Express Checkout: Processing shipping webhook');
+    
+    $payload = json_decode($request->get_body(), true);
+    
+    if (empty($payload)) {
+        error_log('Express Checkout: Empty payload in shipping webhook');
+        return new WP_Error(
+            'invalid_payload',
+            'Invalid or empty webhook payload',
+            array('status' => 400)
+        );
+    }
+    
+    error_log('Express Checkout: Webhook payload: ' . json_encode($payload));
+    
+    // Extract necessary data
+    $resource_type = isset($payload['resource_type']) ? $payload['resource_type'] : '';
+    $resource = isset($payload['resource']) ? $payload['resource'] : array();
+    $event_type = isset($payload['event_type']) ? $payload['event_type'] : '';
+    
+    if ($resource_type !== 'checkout-shipping-address-change' || empty($resource)) {
+        error_log('Express Checkout: Invalid resource type or empty resource');
+        return new WP_REST_Response(array('success' => false), 400);
+    }
+    
+    // Extract PayPal order ID and shipping address
+    $paypal_order_id = isset($resource['id']) ? $resource['id'] : '';
+    $shipping_address = isset($resource['shipping_address']) ? $resource['shipping_address'] : array();
+    
+    if (empty($paypal_order_id) || empty($shipping_address)) {
+        error_log('Express Checkout: Missing PayPal order ID or shipping address');
+        return new WP_REST_Response(array('success' => false), 400);
+    }
+    
+    error_log('Express Checkout: Processing shipping change for PayPal order ' . $paypal_order_id);
+    
+    // Look up the order in our database to get the callback URL
+    global $wpdb;
+    $transactions_table = $wpdb->prefix . 'wppps_transaction_log';
+    
+    $transaction = $wpdb->get_row($wpdb->prepare(
+        "SELECT * FROM $transactions_table WHERE paypal_order_id = %s ORDER BY id DESC LIMIT 1",
+        $paypal_order_id
+    ));
+    
+    if (!$transaction) {
+        error_log('Express Checkout: No transaction found for PayPal order ' . $paypal_order_id);
+        return new WP_REST_Response(array('success' => false), 404);
+    }
+    
+    // Get the site information
+    $sites_table = $wpdb->prefix . 'wppps_sites';
+    $site = $wpdb->get_row($wpdb->prepare(
+        "SELECT * FROM $sites_table WHERE id = %d",
+        $transaction->site_id
+    ));
+    
+    if (!$site) {
+        error_log('Express Checkout: No site found for transaction');
+        return new WP_REST_Response(array('success' => false), 404);
+    }
+    
+    // Get the stored express checkout data
+    $express_data = get_transient('wppps_express_checkout_' . $site->id . '_' . $transaction->order_id);
+    
+    if (!$express_data || empty($express_data['callback_url'])) {
+        error_log('Express Checkout: No callback URL found for transaction');
+        return new WP_REST_Response(array('success' => false), 404);
+    }
+    
+    // Call the callback URL to get shipping options
+    $callback_url = $express_data['callback_url'];
+    
+    // Generate security hash
+    $timestamp = time();
+    $hash = hash_hmac('sha256', $timestamp . $transaction->order_id . $paypal_order_id . $site->api_key, $site->api_secret);
+    
+    // Add query parameters to callback URL
+    $callback_url = add_query_arg(array(
+        'order_id' => $transaction->order_id,
+        'paypal_order_id' => $paypal_order_id,
+        'hash' => $hash,
+        'timestamp' => $timestamp
+    ), $callback_url);
+    
+    error_log('Express Checkout: Calling callback URL: ' . $callback_url);
+    
+    // Send shipping address to callback URL
+    $response = wp_remote_post($callback_url, array(
+        'body' => array(
+            'shipping_data' => json_encode(array(
+                'address' => $shipping_address,
+                'name' => isset($resource['shipping_name']) ? $resource['shipping_name'] : array()
+            ))
+        ),
+        'timeout' => 30
+    ));
+    
+    // Check for errors
+    if (is_wp_error($response)) {
+        error_log('Express Checkout: Error calling callback URL: ' . $response->get_error_message());
+        return new WP_REST_Response(array('success' => false), 500);
+    }
+    
+    // Get response code
+    $response_code = wp_remote_retrieve_response_code($response);
+    
+    if ($response_code !== 200) {
+        error_log('Express Checkout: Callback URL returned error code: ' . $response_code);
+        return new WP_REST_Response(array('success' => false), 500);
+    }
+    
+    // Get shipping options from response
+    $body = json_decode(wp_remote_retrieve_body($response), true);
+    
+    if (!$body || !isset($body['success']) || $body['success'] !== true) {
+        error_log('Express Checkout: Invalid response from callback URL: ' . wp_remote_retrieve_body($response));
+        return new WP_REST_Response(array('success' => false), 500);
+    }
+    
+    // Extract shipping options
+    $shipping_options = isset($body['shipping_options']) ? $body['shipping_options'] : array();
+    
+    if (empty($shipping_options)) {
+        error_log('Express Checkout: No shipping options returned from callback URL');
+        return new WP_REST_Response(array(
+            'success' => false,
+            'details' => array(
+                array(
+                    'issue' => 'NO_SHIPPING_OPTIONS',
+                    'description' => 'No shipping options available for this address'
+                )
+            )
+        ), 400);
+    }
+    
+    error_log('Express Checkout: Got ' . count($shipping_options) . ' shipping options from callback');
+    
+    // Format shipping options for PayPal
+    $paypal_shipping_options = array();
+    
+    foreach ($shipping_options as $option) {
+        $paypal_shipping_options[] = array(
+            'id' => $option['id'],
+            'label' => $option['label'],
+            'type' => 'SHIPPING',
+            'selected' => isset($option['selected']) && $option['selected'],
+            'amount' => array(
+                'currency_code' => $transaction->currency,
+                'value' => number_format($option['cost'], 2, '.', '')
+            )
+        );
+    }
+    
+    error_log('Express Checkout: Returning shipping options to PayPal: ' . json_encode($paypal_shipping_options));
+    
+    // Return shipping options to PayPal
+    return new WP_REST_Response(array(
+        'shipping_options' => $paypal_shipping_options
+    ), 200);
+}
 /**
  * Plugin deactivation hook
  */

@@ -84,17 +84,34 @@ class WPPPS_REST_API {
         'permission_callback' => '__return_true',
     ));
     
-    register_rest_route('wppps/v1', '/paypal-express-buttons', array(
-        'methods' => 'GET',
-        'callback' => array($this, 'get_express_buttons'),
-        'permission_callback' => '__return_true',
-    ));
     
-    register_rest_route('wppps/v1', '/create-express-order', array(
-        'methods' => 'POST',
-        'callback' => array($this, 'create_express_order'),
-        'permission_callback' => '__return_true',
-    ));
+    // Register route for Express PayPal buttons
+register_rest_route('wppps/v1', '/express-paypal-buttons', array(
+    'methods' => 'GET',
+    'callback' => array($this, 'get_express_paypal_buttons'),
+    'permission_callback' => '__return_true',
+));
+
+// Register route for creating Express Checkout
+register_rest_route('wppps/v1', '/create-express-checkout', array(
+    'methods' => 'POST',
+    'callback' => array($this, 'create_express_checkout'),
+    'permission_callback' => '__return_true',
+));
+
+// Register route for updating Express shipping
+register_rest_route('wppps/v1', '/update-express-shipping', array(
+    'methods' => 'POST',
+    'callback' => array($this, 'update_express_shipping'),
+    'permission_callback' => '__return_true',
+));
+
+// Register route for capturing Express payment
+register_rest_route('wppps/v1', '/capture-express-payment', array(
+    'methods' => 'POST',
+    'callback' => array($this, 'capture_express_payment'),
+    'permission_callback' => '__return_true',
+));
     
     register_rest_route('wppps/v1', '/seller-protection/(?P<order_id>[A-Za-z0-9]+)', array(
     'methods' => 'GET',
@@ -931,56 +948,51 @@ private function validate_request($request) {
     /**
      * Log transaction in database
      */
-    private function log_transaction($site_id, $order_id, $paypal_order_id, $amount, $currency, $type = 'standard') {
-    global $wpdb;
-    
-    $table_name = $wpdb->prefix . 'wppps_transaction_log';
-    
-    // Check if transaction already exists
-    $existing = $wpdb->get_var($wpdb->prepare(
-        "SELECT id FROM $table_name WHERE site_id = %d AND order_id = %s AND paypal_order_id = %s",
-        $site_id,
-        $order_id,
-        $paypal_order_id
-    ));
-    
-    // Add type field to the transaction
-    $transaction_type = ($type === 'express') ? 'express' : 'standard';
-    
-    if ($existing) {
-        // Update existing transaction
-        $wpdb->update(
-            $table_name,
-            array(
-                'amount' => $amount,
-                'currency' => $currency,
-                'status' => 'pending',
-                'transaction_type' => $transaction_type,
-                'created_at' => current_time('mysql'),
-            ),
-            array('id' => $existing)
-        );
+    private function log_transaction($site_id, $order_id, $paypal_order_id, $amount, $currency) {
+        global $wpdb;
         
-        return $existing;
-    } else {
-        // Insert new transaction
-        $wpdb->insert(
-            $table_name,
-            array(
-                'site_id' => $site_id,
-                'order_id' => $order_id,
-                'paypal_order_id' => $paypal_order_id,
-                'amount' => $amount,
-                'currency' => $currency,
-                'status' => 'pending',
-                'transaction_type' => $transaction_type,
-                'created_at' => current_time('mysql'),
-            )
-        );
+        $table_name = $wpdb->prefix . 'wppps_transaction_log';
         
-        return $wpdb->insert_id;
+        // Check if transaction already exists
+        $existing = $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM $table_name WHERE site_id = %d AND order_id = %s AND paypal_order_id = %s",
+            $site_id,
+            $order_id,
+            $paypal_order_id
+        ));
+        
+        if ($existing) {
+            // Update existing transaction
+            $wpdb->update(
+                $table_name,
+                array(
+                    'amount' => $amount,
+                    'currency' => $currency,
+                    'status' => 'pending',
+                    'created_at' => current_time('mysql'),
+                ),
+                array('id' => $existing)
+            );
+            
+            return $existing;
+        } else {
+            // Insert new transaction
+            $wpdb->insert(
+                $table_name,
+                array(
+                    'site_id' => $site_id,
+                    'order_id' => $order_id,
+                    'paypal_order_id' => $paypal_order_id,
+                    'amount' => $amount,
+                    'currency' => $currency,
+                    'status' => 'pending',
+                    'created_at' => current_time('mysql'),
+                )
+            );
+            
+            return $wpdb->insert_id;
+        }
     }
-}
     
     /**
      * Get JSON parameters from request
@@ -1087,15 +1099,16 @@ private function validate_request($request) {
     
     
 /**
- * Render the PayPal Express buttons template
+ * Render the Express PayPal buttons template
  */
-public function get_express_buttons($request) {
-    // Validate API key and hash similar to the regular buttons method
+public function get_express_paypal_buttons($request) {
+    // Validate using api key and secret
     $api_key = $request->get_param('api_key');
-    $hash = $request->get_param('hash');
+    $api_secret_hash = $request->get_param('hash');
     $timestamp = $request->get_param('timestamp');
-    
     $site = null;
+    
+    error_log('Express Checkout: Received button request with params: ' . json_encode($request->get_params()));
     
     if (!empty($api_key)) {
         $site = $this->get_site_by_api_key($api_key);
@@ -1105,6 +1118,14 @@ public function get_express_buttons($request) {
             echo '<div style="color:red;">Invalid API key. Please check your configuration.</div>';
             exit;
         }
+        
+        // Verify hash
+        $expected_hash = hash_hmac('sha256', $timestamp . 'express_checkout' . $api_key, $site->api_secret);
+        if (!hash_equals($expected_hash, $api_secret_hash)) {
+            header('Content-Type: text/html; charset=UTF-8');
+            echo '<div style="color:red;">Invalid security hash. Please check your configuration.</div>';
+            exit;
+        }
     }
     
     // Get parameters
@@ -1112,29 +1133,188 @@ public function get_express_buttons($request) {
     $currency = $request->get_param('currency') ?: 'USD';
     $callback_url = $request->get_param('callback_url') ? base64_decode($request->get_param('callback_url')) : '';
     $site_url = $request->get_param('site_url') ? base64_decode($request->get_param('site_url')) : '';
+    $needs_shipping = $request->get_param('needs_shipping') === 'yes';
+    
+    error_log('Express Checkout: Preparing buttons with amount=' . $amount . ', currency=' . $currency . ', needs_shipping=' . ($needs_shipping ? 'yes' : 'no'));
     
     // Set up template variables
     $client_id = $this->paypal_api->get_client_id();
     $environment = $this->paypal_api->get_environment();
+    $is_express = true;
     
     // Critical: Set the content type header to HTML
     header('Content-Type: text/html; charset=UTF-8');
     
-    // Include the express template
-    include WPPPS_PLUGIN_DIR . 'templates/paypal-express-buttons.php';
+    // Include the Express PayPal buttons template
+    include WPPPS_PLUGIN_DIR . 'templates/express-paypal-buttons.php';
     
     // Exit to prevent WordPress from further processing
     exit;
 }
 
 /**
- * Create a PayPal order for Express Checkout
+ * Create Express Checkout order in PayPal
  */
-public function create_express_order($request) {
-    // Get request JSON
+public function create_express_checkout($request) {
+    error_log('Express Checkout: Received create express checkout request');
+    
+    // Get request data
+    $api_key = $request->get_param('api_key');
+    $hash = $request->get_param('hash');
+    $timestamp = $request->get_param('timestamp');
+    $order_data_encoded = $request->get_param('order_data');
+    
+    if (empty($api_key) || empty($hash) || empty($timestamp) || empty($order_data_encoded)) {
+        error_log('Express Checkout: Missing required parameters');
+        return new WP_Error(
+            'missing_params',
+            __('Missing required parameters', 'woo-paypal-proxy-server'),
+            array('status' => 400)
+        );
+    }
+    
+    // Get site by API key
+    $site = $this->get_site_by_api_key($api_key);
+    if (!$site) {
+        error_log('Express Checkout: Invalid API key');
+        return new WP_Error(
+            'invalid_api_key',
+            __('Invalid API key', 'woo-paypal-proxy-server'),
+            array('status' => 401)
+        );
+    }
+    
+    // Decode order data
+    $order_data = json_decode(base64_decode($order_data_encoded), true);
+    if (!$order_data) {
+        error_log('Express Checkout: Invalid order data format');
+        return new WP_Error(
+            'invalid_data',
+            __('Invalid order data format', 'woo-paypal-proxy-server'),
+            array('status' => 400)
+        );
+    }
+    
+    error_log('Express Checkout: Processing order data: ' . json_encode($order_data));
+    
+    // Validate hash
+    $expected_hash = hash_hmac('sha256', $timestamp . $order_data['order_id'] . $order_data['order_total'] . $api_key, $site->api_secret);
+    if (!hash_equals($expected_hash, $hash)) {
+        error_log('Express Checkout: Invalid hash');
+        return new WP_Error(
+            'invalid_hash',
+            __('Invalid hash', 'woo-paypal-proxy-server'),
+            array('status' => 401)
+        );
+    }
+    
+    try {
+        // Initialize PayPal API
+        $paypal_api = new WPPPS_PayPal_API();
+        
+        // Prepare order data for PayPal
+        $reference_id = 'WC_ORDER_' . $order_data['order_id'];
+        $return_url = isset($order_data['return_url']) ? $order_data['return_url'] : '';
+        $cancel_url = isset($order_data['cancel_url']) ? $order_data['cancel_url'] : '';
+        
+        // Prepare custom data for PayPal
+        $custom_data = array();
+        
+        // Add line items if available
+        if (!empty($order_data['items'])) {
+            $custom_data['line_items'] = $order_data['items'];
+        }
+        
+        // Set application context to indicate this is Express Checkout
+        $application_context = array(
+            'shipping_preference' => $order_data['needs_shipping'] ? 'GET_FROM_FILE' : 'NO_SHIPPING',
+            'user_action' => 'PAY_NOW',
+            'return_url' => $return_url,
+            'cancel_url' => $cancel_url
+        );
+        
+        // Get the order amount - check both 'cart_total' and 'order_total' parameters to handle both formats
+        $order_amount = isset($order_data['cart_total']) ? $order_data['cart_total'] : 
+                       (isset($order_data['order_total']) ? $order_data['order_total'] : 0);
+                
+        error_log('Express Checkout: Creating PayPal order with amount=' . $order_amount . 
+                 ', currency=' . $order_data['currency'] . 
+                 ', shipping_preference=' . ($order_data['needs_shipping'] ? 'GET_FROM_FILE' : 'NO_SHIPPING'));        
+        // Create PayPal order
+        $paypal_order = $paypal_api->create_order(
+            $order_amount,
+            $order_data['currency'],
+            $reference_id,
+            $return_url,
+            $cancel_url,
+            $custom_data,
+            $application_context
+        );
+        
+        if (is_wp_error($paypal_order)) {
+            error_log('Express Checkout: Error creating PayPal order: ' . $paypal_order->get_error_message());
+            throw new Exception($paypal_order->get_error_message());
+        }
+        
+        error_log('Express Checkout: Created PayPal order: ' . json_encode($paypal_order));
+        
+        // Get approval URL from links
+        $approve_url = '';
+        foreach ($paypal_order['links'] as $link) {
+            if ($link['rel'] === 'approve') {
+                $approve_url = $link['href'];
+                break;
+            }
+        }
+        
+        // Store order data for later use
+        $this->store_express_checkout_data($site->id, $order_data['order_id'], array(
+            'paypal_order_id' => $paypal_order['id'],
+            'order_key' => $order_data['order_key'],
+            'callback_url' => isset($order_data['callback_url']) ? $order_data['callback_url'] : '',
+            'needs_shipping' => $order_data['needs_shipping'],
+            'server_id' => $order_data['server_id']
+        ));
+        
+        // Log transaction
+        $this->log_transaction(
+            $site->id,
+            $order_data['order_id'],
+            $paypal_order['id'],
+            $order_data['order_total'],
+            $order_data['currency'],
+            'pending',
+            json_encode(array('express_checkout' => true))
+        );
+        
+        // Return success response with PayPal order ID and approval URL
+        return new WP_REST_Response(array(
+            'success' => true,
+            'paypal_order_id' => $paypal_order['id'],
+            'approve_url' => $approve_url
+        ), 200);
+        
+    } catch (Exception $e) {
+        error_log('Express Checkout: Exception creating order: ' . $e->getMessage());
+        return new WP_Error(
+            'order_creation_error',
+            $e->getMessage(),
+            array('status' => 500)
+        );
+    }
+}
+
+/**
+ * Update Express Checkout shipping methods
+ */
+public function update_express_shipping($request) {
+    error_log('Express Checkout: Received update shipping request');
+    
+    // Get request data
     $params = $this->get_json_params($request);
     
     if (empty($params)) {
+        error_log('Express Checkout: Invalid request format');
         return new WP_Error(
             'invalid_request',
             __('Invalid request format', 'woo-paypal-proxy-server'),
@@ -1142,112 +1322,294 @@ public function create_express_order($request) {
         );
     }
     
-    // Validate required parameters
-    $required_params = array('api_key', 'order_id', 'amount', 'currency');
-    foreach ($required_params as $param) {
-        if (empty($params[$param])) {
-            return new WP_Error(
-                'missing_param',
-                sprintf(__('Missing required parameter: %s', 'woo-paypal-proxy-server'), $param),
-                array('status' => 400)
-            );
-        }
+    // Extract parameters
+    $api_key = isset($params['api_key']) ? $params['api_key'] : '';
+    $hash = isset($params['hash']) ? $params['hash'] : '';
+    $timestamp = isset($params['timestamp']) ? $params['timestamp'] : '';
+    $request_data_encoded = isset($params['request_data']) ? $params['request_data'] : '';
+    
+    if (empty($api_key) || empty($hash) || empty($timestamp) || empty($request_data_encoded)) {
+        error_log('Express Checkout: Missing required parameters');
+        return new WP_Error(
+            'missing_params',
+            __('Missing required parameters', 'woo-paypal-proxy-server'),
+            array('status' => 400)
+        );
     }
     
     // Get site by API key
-    $site = $this->get_site_by_api_key($params['api_key']);
-    
+    $site = $this->get_site_by_api_key($api_key);
     if (!$site) {
+        error_log('Express Checkout: Invalid API key');
         return new WP_Error(
             'invalid_api_key',
-            __('Invalid API key or site not registered', 'woo-paypal-proxy-server'),
+            __('Invalid API key', 'woo-paypal-proxy-server'),
             array('status' => 401)
         );
     }
     
-    // Get order data from transient storage
-    $order_data = $this->get_order_data($site->id, $params['order_id']);
-    
-    // Log the order data
-    error_log('Express Checkout - Order data for creation: ' . json_encode($order_data));
-    
-    $custom_data = array();
-    
-    // Add description if available
-    if (!empty($order_data['description'])) {
-        $custom_data['description'] = $order_data['description'];
-    } else {
-        $custom_data['description'] = 'Express Checkout Order #' . $params['order_id'];
-    }
-    
-    // Add shipping address if available
-    if (!empty($order_data['shipping_address'])) {
-        $custom_data['shipping_address'] = $order_data['shipping_address'];
-    }
-    
-    // Add billing address if available
-    if (!empty($order_data['billing_address'])) {
-        $custom_data['billing_address'] = $order_data['billing_address'];
-    }
-    
-    // Add line items if available
-    if (!empty($order_data['line_items'])) {
-        $custom_data['line_items'] = $order_data['line_items'];
-    }
-    
-    // Add shipping amount if available
-    if (isset($order_data['shipping_amount'])) {
-        $custom_data['shipping_amount'] = $order_data['shipping_amount'];
-    }
-    
-    // Configure for express checkout
-    $custom_data['express_checkout'] = true;
-    
-    // Set application context for PayPal
-    $custom_data['application_context'] = array(
-        'shipping_preference' => 'GET_FROM_FILE',
-        'user_action' => 'PAY_NOW',
-        'return_url' => site_url(),
-        'cancel_url' => site_url()
-    );
-    
-    // Create PayPal order with advanced options
-    $paypal_order = $this->paypal_api->create_express_order(
-        $params['amount'],
-        $params['currency'],
-        $params['order_id'],
-        '',  // return_url - handled through message passing
-        '',  // cancel_url - handled through message passing
-        $custom_data
-    );
-    
-    if (is_wp_error($paypal_order)) {
-        $error_message = $paypal_order->get_error_message();
-        error_log('Express Checkout - Error creating PayPal order: ' . $error_message);
-        
+    // Decode request data
+    $request_data = json_decode(base64_decode($request_data_encoded), true);
+    if (!$request_data) {
+        error_log('Express Checkout: Invalid request data format');
         return new WP_Error(
-            'paypal_error',
-            $error_message,
-            array('status' => 500)
+            'invalid_data',
+            __('Invalid request data format', 'woo-paypal-proxy-server'),
+            array('status' => 400)
         );
     }
     
-    // Log transaction
-    $this->log_transaction(
-        $site->id, 
-        $params['order_id'], 
-        $paypal_order['id'], 
-        $params['amount'], 
-        $params['currency'],
-        'express'
+    error_log('Express Checkout: Processing shipping update: ' . json_encode($request_data));
+    
+    // Extract request data
+    $order_id = isset($request_data['order_id']) ? $request_data['order_id'] : '';
+    $paypal_order_id = isset($request_data['paypal_order_id']) ? $request_data['paypal_order_id'] : '';
+    $shipping_method = isset($request_data['shipping_method']) ? $request_data['shipping_method'] : '';
+    
+    // Validate hash
+    $expected_hash = hash_hmac('sha256', $timestamp . $order_id . $paypal_order_id . $api_key, $site->api_secret);
+    if (!hash_equals($expected_hash, $hash)) {
+        error_log('Express Checkout: Invalid hash');
+        return new WP_Error(
+            'invalid_hash',
+            __('Invalid hash', 'woo-paypal-proxy-server'),
+            array('status' => 401)
+        );
+    }
+    
+    try {
+        // Get stored order data
+        $stored_data = $this->get_express_checkout_data($site->id, $order_id);
+        if (!$stored_data || $stored_data['paypal_order_id'] !== $paypal_order_id) {
+            error_log('Express Checkout: No matching stored data found or PayPal order ID mismatch');
+            throw new Exception('Invalid order data');
+        }
+        
+        // Initialize PayPal API
+        $paypal_api = new WPPPS_PayPal_API();
+        
+        // If shipping method is provided, update the order with selected method
+        if (!empty($shipping_method)) {
+            error_log('Express Checkout: Updating order with shipping method: ' . $shipping_method);
+            
+            // Get selected shipping option from client
+            // This would be coming from stored shipping options or a new request to client
+            
+            // Update PayPal order with shipping method
+            $updated_order = $paypal_api->update_paypal_order_shipping(
+                $paypal_order_id,
+                $shipping_method,
+                $request_data['order_total'],
+                $request_data['currency']
+            );
+            
+            if (is_wp_error($updated_order)) {
+                error_log('Express Checkout: Error updating PayPal order: ' . $updated_order->get_error_message());
+                throw new Exception($updated_order->get_error_message());
+            }
+            
+            error_log('Express Checkout: Successfully updated PayPal order with shipping method');
+        }
+        
+        // Return success response
+        return new WP_REST_Response(array(
+            'success' => true,
+            'message' => 'Shipping updated successfully'
+        ), 200);
+        
+    } catch (Exception $e) {
+        error_log('Express Checkout: Exception updating shipping: ' . $e->getMessage());
+        return new WP_Error(
+            'shipping_update_error',
+            $e->getMessage(),
+            array('status' => 500)
+        );
+    }
+}
+
+/**
+ * Capture Express Checkout payment
+ */
+public function capture_express_payment($request) {
+    error_log('Express Checkout: Received capture payment request');
+    
+    // Get request data
+    $params = $this->get_json_params($request);
+    
+    if (empty($params)) {
+        error_log('Express Checkout: Invalid request format');
+        return new WP_Error(
+            'invalid_request',
+            __('Invalid request format', 'woo-paypal-proxy-server'),
+            array('status' => 400)
+        );
+    }
+    
+    // Extract parameters
+    $api_key = isset($params['api_key']) ? $params['api_key'] : '';
+    $hash = isset($params['hash']) ? $params['hash'] : '';
+    $timestamp = isset($params['timestamp']) ? $params['timestamp'] : '';
+    $request_data_encoded = isset($params['request_data']) ? $params['request_data'] : '';
+    
+    if (empty($api_key) || empty($hash) || empty($timestamp) || empty($request_data_encoded)) {
+        error_log('Express Checkout: Missing required parameters');
+        return new WP_Error(
+            'missing_params',
+            __('Missing required parameters', 'woo-paypal-proxy-server'),
+            array('status' => 400)
+        );
+    }
+    
+    // Get site by API key
+    $site = $this->get_site_by_api_key($api_key);
+    if (!$site) {
+        error_log('Express Checkout: Invalid API key');
+        return new WP_Error(
+            'invalid_api_key',
+            __('Invalid API key', 'woo-paypal-proxy-server'),
+            array('status' => 401)
+        );
+    }
+    
+    // Decode request data
+    $request_data = json_decode(base64_decode($request_data_encoded), true);
+    if (!$request_data) {
+        error_log('Express Checkout: Invalid request data format');
+        return new WP_Error(
+            'invalid_data',
+            __('Invalid request data format', 'woo-paypal-proxy-server'),
+            array('status' => 400)
+        );
+    }
+    
+    error_log('Express Checkout: Processing payment capture: ' . json_encode($request_data));
+    
+    // Extract request data
+    $order_id = isset($request_data['order_id']) ? $request_data['order_id'] : '';
+    $paypal_order_id = isset($request_data['paypal_order_id']) ? $request_data['paypal_order_id'] : '';
+    
+    // Validate hash
+    $expected_hash = hash_hmac('sha256', $timestamp . $order_id . $paypal_order_id . $api_key, $site->api_secret);
+    if (!hash_equals($expected_hash, $hash)) {
+        error_log('Express Checkout: Invalid hash');
+        return new WP_Error(
+            'invalid_hash',
+            __('Invalid hash', 'woo-paypal-proxy-server'),
+            array('status' => 401)
+        );
+    }
+    
+    try {
+        // Get stored order data
+        $stored_data = $this->get_express_checkout_data($site->id, $order_id);
+        if (!$stored_data || $stored_data['paypal_order_id'] !== $paypal_order_id) {
+            error_log('Express Checkout: No matching stored data found or PayPal order ID mismatch');
+            throw new Exception('Invalid order data');
+        }
+        
+        // Initialize PayPal API
+        $paypal_api = new WPPPS_PayPal_API();
+        
+        // Capture the payment
+        $capture = $paypal_api->capture_payment($paypal_order_id);
+        
+        if (is_wp_error($capture)) {
+            error_log('Express Checkout: Error capturing payment: ' . $capture->get_error_message());
+            throw new Exception($capture->get_error_message());
+        }
+        
+        error_log('Express Checkout: Payment captured successfully: ' . json_encode($capture));
+        
+        // Extract transaction ID
+        $transaction_id = '';
+        if (!empty($capture['purchase_units'][0]['payments']['captures'][0]['id'])) {
+            $transaction_id = $capture['purchase_units'][0]['payments']['captures'][0]['id'];
+        }
+        
+        // Extract seller protection status
+        $seller_protection = 'UNKNOWN';
+        if (!empty($capture['purchase_units'][0]['payments']['captures'][0]['seller_protection']['status'])) {
+            $seller_protection = $capture['purchase_units'][0]['payments']['captures'][0]['seller_protection']['status'];
+        }
+        
+        // Update transaction log
+        $this->update_transaction_status(
+            $site->id,
+            $order_id,
+            $paypal_order_id,
+            'completed',
+            json_encode(array(
+                'transaction_id' => $transaction_id,
+                'seller_protection' => $seller_protection,
+                'capture_data' => $capture
+            ))
+        );
+        
+        // Return success response with transaction ID
+        return new WP_REST_Response(array(
+            'success' => true,
+            'transaction_id' => $transaction_id,
+            'seller_protection' => $seller_protection
+        ), 200);
+        
+    } catch (Exception $e) {
+        error_log('Express Checkout: Exception capturing payment: ' . $e->getMessage());
+        return new WP_Error(
+            'payment_capture_error',
+            $e->getMessage(),
+            array('status' => 500)
+        );
+    }
+}
+
+/**
+ * Store Express Checkout data in transient
+ */
+private function store_express_checkout_data($site_id, $order_id, $data) {
+    $key = 'wppps_express_checkout_' . $site_id . '_' . $order_id;
+    set_transient($key, $data, 24 * HOUR_IN_SECONDS);
+    error_log('Express Checkout: Stored data for site ' . $site_id . ', order ' . $order_id . ': ' . json_encode($data));
+    return true;
+}
+
+/**
+ * Get Express Checkout data from transient
+ */
+private function get_express_checkout_data($site_id, $order_id) {
+    $key = 'wppps_express_checkout_' . $site_id . '_' . $order_id;
+    $data = get_transient($key);
+    error_log('Express Checkout: Retrieved data for site ' . $site_id . ', order ' . $order_id . ': ' . ($data ? json_encode($data) : 'not found'));
+    return $data;
+}
+
+/**
+ * Update transaction status in log
+ */
+private function update_transaction_status($site_id, $order_id, $paypal_order_id, $status, $transaction_data = null) {
+    global $wpdb;
+    $log_table = $wpdb->prefix . 'wppps_transaction_log';
+    
+    $data = array(
+        'status' => $status,
+        'completed_at' => current_time('mysql')
     );
     
-    // Return the PayPal order details
-    return new WP_REST_Response(array(
-        'success' => true,
-        'order_id' => $paypal_order['id'],
-        'status' => $paypal_order['status'],
-        'links' => $paypal_order['links'],
-    ), 200);
+    if ($transaction_data !== null) {
+        $data['transaction_data'] = $transaction_data;
+    }
+    
+    $result = $wpdb->update(
+        $log_table,
+        $data,
+        array(
+            'site_id' => $site_id,
+            'order_id' => $order_id,
+            'paypal_order_id' => $paypal_order_id
+        )
+    );
+    
+    error_log('Express Checkout: Updated transaction status to ' . $status . ' for order ' . $order_id . ', result: ' . ($result !== false ? 'success' : 'failed'));
+    
+    return $result;
 }
 }

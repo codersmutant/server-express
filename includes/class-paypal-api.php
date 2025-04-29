@@ -1166,6 +1166,14 @@ public function update_paypal_order_shipping($paypal_order_id, $shipping_option_
     
     $this->log_info('Retrieved current order details for update: ' . json_encode($current_order));
     
+    
+            $current_order = $this->get_order_details($paypal_order_id);
+        if (is_wp_error($current_order)) {
+            return $current_order;
+        }
+
+// Extract the reference ID from the response
+        $reference_id = $current_order['purchase_units'][0]['reference_id'];
     // Extract the necessary parts from the current order
     $purchase_unit = $current_order['purchase_units'][0];
     
@@ -1173,8 +1181,7 @@ public function update_paypal_order_shipping($paypal_order_id, $shipping_option_
     $patches = array(
         array(
             'op' => 'replace',
-            //'path' => '/purchase_units/@reference_id=\'' . $purchase_unit['reference_id'] . '\'/amount',
-            'path' => '/purchase_units/0/amount',
+            'path' => "/purchase_units/@reference_id=='{$reference_id}'/amount",
             'value' => array(
                 'currency_code' => $currency,
                 'value' => number_format($amount, 2, '.', '')

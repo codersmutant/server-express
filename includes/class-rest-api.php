@@ -84,6 +84,12 @@ class WPPPS_REST_API {
         'permission_callback' => '__return_true',
     ));
     
+    register_rest_route('wppps/v1', '/get-paypal-order', array(
+    'methods' => 'POST',
+    'callback' => array($this, 'get_paypal_order'),
+    'permission_callback' => '__return_true',
+));
+    
     
     // Register route for Express PayPal buttons
 register_rest_route('wppps/v1', '/express-paypal-buttons', array(
@@ -1841,5 +1847,77 @@ private function update_transaction_status($site_id, $order_id, $paypal_order_id
     error_log('Express Checkout: Updated transaction status to ' . $status . ' for order ' . $order_id . ', result: ' . ($result !== false ? 'success' : 'failed'));
     
     return $result;
-}
+    }
+    
+    
+/**
+ * Get complete PayPal order details
+ * Add this method to the WPPPS_REST_API class
+ */
+public function get_paypal_order($request) {
+    // Get request JSON
+    $params = $this->get_json_params($request);
+    
+    if (empty($params)) {
+        return new WP_Error(
+            'invalid_request',
+            __('Invalid request format', 'woo-paypal-proxy-server'),
+            array('status' => 400)
+        );
+    }
+    
+    // Validate required parameters
+    $required_params = array('api_key', 'paypal_order_id', 'timestamp', 'hash');
+    foreach ($required_params as $param) {
+        if (empty($params[$param])) {
+            return new WP_Error(
+                'missing_param',
+                sprintf(__('Missing required parameter: %s', 'woo-paypal-proxy-server'), $param),
+                array('status' => 400)
+            );
+        }
+    }
+    
+    // Get site by API key
+    $site = $this->get_site_by_api_key($params['api_key']);
+    
+    if (!$site) {
+        return new WP_Error(
+            'invalid_api_key',
+            __('Invalid API key or site not registered', 'woo-paypal-proxy-server'),
+            array('status' => 401)
+        );
+    }
+    
+    // Verify hash
+    $expected_hash = hash_hmac('sha256', $params['timestamp'] . $params['paypal_order_id'] . $params['api_key'], $site->api_secret);
+    if (!hash_equals($expected_hash, $params['hash'])) {
+        return new WP_Error(
+            'invalid_hash',
+            __('Invalid security hash', 'woo-paypal-proxy-server'),
+            array('status' => 401)
+        );
+    }
+    
+    // Get PayPal order details
+    $paypal_order_id = $params['paypal_order_id'];
+    
+    // Get the complete PayPal order details
+    $paypal_api = new WPPPS_PayPal_API();
+    $order_details = $paypal_api->get_order_details($paypal_order_id);
+    
+    if (is_wp_error($order_details)) {
+        return new WP_Error(
+            'paypal_error',
+            $order_details->get_error_message(),
+            array('status' => 500)
+        );
+    }
+    
+    // Return the complete order details
+    return new WP_REST_Response(array(
+        'success' => true,
+        'order_details' => $order_details
+    ), 200);
+    }
 }

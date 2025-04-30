@@ -1145,7 +1145,7 @@ public function create_order($amount, $currency = 'USD', $reference_id = '', $re
 /**
  * Update PayPal order with shipping information
  */
-public function update_paypal_order_shipping($paypal_order_id, $shipping_option_id, $amount, $currency = 'USD') {
+public function update_paypal_order_shipping($paypal_order_id, $shipping_option_id, $amount, $currency = 'USD', $shipping_cost = 0) {
     // Get access token
     $access_token = $this->get_access_token();
     
@@ -1166,25 +1166,51 @@ public function update_paypal_order_shipping($paypal_order_id, $shipping_option_
     
     $this->log_info('Retrieved current order details for update: ' . json_encode($current_order));
     
+    // Extract the reference ID from the response
+    $reference_id = $current_order['purchase_units'][0]['reference_id'];
     
-            $current_order = $this->get_order_details($paypal_order_id);
-        if (is_wp_error($current_order)) {
-            return $current_order;
+    // Calculate item total (total minus shipping cost)
+    // If shipping cost isn't provided, use a reasonable default by checking the difference
+    if ($shipping_cost <= 0 && isset($current_order['purchase_units'][0]['amount']['value'])) {
+        $old_total = floatval($current_order['purchase_units'][0]['amount']['value']);
+        $new_total = floatval($amount);
+        
+        if ($new_total > $old_total) {
+            // If total increased, assume the difference is shipping
+            $shipping_cost = $new_total - $old_total;
+            $item_total = $old_total;
+        } else {
+            // Otherwise assume a reasonable split (80% item, 20% shipping)
+            $shipping_cost = $new_total * 0.2;
+            $item_total = $new_total * 0.8;
         }
-
-// Extract the reference ID from the response
-        $reference_id = $current_order['purchase_units'][0]['reference_id'];
-    // Extract the necessary parts from the current order
-    $purchase_unit = $current_order['purchase_units'][0];
+    } else {
+        $item_total = floatval($amount) - floatval($shipping_cost);
+    }
+    
+    // Ensure item_total is never negative
+    $item_total = max(0.01, $item_total);
+    
+    $this->log_info("Updating PayPal order with: Total=$amount, Item Total=$item_total, Shipping=$shipping_cost");
     
     // Prepare the patch request to update shipping option and amounts
     $patches = array(
         array(
             'op' => 'replace',
-            'path' => "/purchase_units/@reference_id=='{$reference_id}'/amount",
+            'path' => "/purchase_units/@reference_id=='$reference_id'/amount",
             'value' => array(
                 'currency_code' => $currency,
-                'value' => number_format($amount, 2, '.', '')
+                'value' => number_format($amount, 2, '.', ''),
+                'breakdown' => array(
+                    'item_total' => array(
+                        'currency_code' => $currency,
+                        'value' => number_format($item_total, 2, '.', '')
+                    ),
+                    'shipping' => array(
+                        'currency_code' => $currency,
+                        'value' => number_format($shipping_cost, 2, '.', '')
+                    )
+                )
             )
         )
     );
@@ -1234,4 +1260,5 @@ public function update_paypal_order_shipping($paypal_order_id, $shipping_option_
     
     return $updated_order;
 }
+
 }

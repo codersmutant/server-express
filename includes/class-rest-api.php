@@ -1365,6 +1365,7 @@ public function update_express_shipping($request) {
     $order_id = isset($request_data['order_id']) ? $request_data['order_id'] : '';
     $paypal_order_id = isset($request_data['paypal_order_id']) ? $request_data['paypal_order_id'] : '';
     $shipping_method = isset($request_data['shipping_method']) ? $request_data['shipping_method'] : '';
+    $shipping_options = isset($request_data['shipping_options']) ? $request_data['shipping_options'] : array();
     
     // Validate hash
     $expected_hash = hash_hmac('sha256', $timestamp . $order_id . $paypal_order_id . $api_key, $site->api_secret);
@@ -1388,28 +1389,38 @@ public function update_express_shipping($request) {
         // Initialize PayPal API
         $paypal_api = new WPPPS_PayPal_API();
         
-        // If shipping method is provided, update the order with selected method
-        if (!empty($shipping_method)) {
-            error_log('Express Checkout: Updating order with shipping method: ' . $shipping_method);
-            
-            // Get selected shipping option from client
-            // This would be coming from stored shipping options or a new request to client
-            
-            // Update PayPal order with shipping method
-            $updated_order = $paypal_api->update_paypal_order_shipping(
-                $paypal_order_id,
-                $shipping_method,
-                $request_data['order_total'],
-                $request_data['currency']
-            );
-            
-            if (is_wp_error($updated_order)) {
-                error_log('Express Checkout: Error updating PayPal order: ' . $updated_order->get_error_message());
-                throw new Exception($updated_order->get_error_message());
+        // Get the order total from request data
+        $order_total = isset($request_data['order_total']) ? $request_data['order_total'] : 0;
+        $currency = isset($request_data['currency']) ? $request_data['currency'] : 'USD';
+        
+        // Check if we have a shipping method selected
+        $selected_shipping_cost = 0;
+        if (!empty($shipping_method) && !empty($request_data['shipping_options'])) {
+            // Find the selected shipping option
+            foreach ($request_data['shipping_options'] as $option) {
+                if ($option['id'] === $shipping_method) {
+                    $selected_shipping_cost = floatval($option['cost']);
+                    error_log('Express Checkout: Selected shipping method cost: ' . $selected_shipping_cost);
+                    break;
+                }
             }
-            
-            error_log('Express Checkout: Successfully updated PayPal order with shipping method');
         }
+        
+        // Update PayPal order with shipping method and new total
+        $updated_order = $paypal_api->update_paypal_order_shipping(
+            $paypal_order_id,
+            $shipping_method,
+            $order_total,
+            $currency,
+            $selected_shipping_cost
+        );
+        
+        if (is_wp_error($updated_order)) {
+            error_log('Express Checkout: Error updating PayPal order: ' . $updated_order->get_error_message());
+            throw new Exception($updated_order->get_error_message());
+        }
+        
+        error_log('Express Checkout: Successfully updated PayPal order with shipping method');
         
         // Return success response
         return new WP_REST_Response(array(

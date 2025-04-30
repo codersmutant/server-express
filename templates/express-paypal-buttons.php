@@ -643,7 +643,8 @@ onShippingChange: function(data, actions) {
                 action: 'payment_approved',
                 payload: {
                     orderID: data.orderID,
-                    wcOrderId: orderData.wcOrderId
+                    wcOrderId: orderData.wcOrderId,
+                    paypalData: data
                 }
             });
             
@@ -651,7 +652,12 @@ onShippingChange: function(data, actions) {
             hideProcessing();
             showSuccess('Payment successful! Finalizing your order...');
             
-            return actions.order.capture();
+            //return actions.order.capture();
+            
+            return actions.order.capture().then(function(captureData) {
+                log('PayPal SDK capture complete (informational only):', captureData);
+                // We still rely on the parent window handler to complete the order
+            });
         },
         
         // On cancel

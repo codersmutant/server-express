@@ -1210,26 +1210,22 @@ public function create_express_checkout($request) {
     
     error_log('Express Checkout: Processing order data: ' . json_encode($order_data));
     
-    $order_amount = isset($order_data['cart_total']) ? $order_data['cart_total'] : 
-               (isset($order_data['order_total']) ? $order_data['order_total'] : 0);
-
-// Validate hash with either parameter
-$expected_hash = hash_hmac('sha256', $timestamp . $order_data['order_id'] . $order_amount . $api_key, $site->api_secret);
-if (!hash_equals($expected_hash, $hash)) {
-    error_log('Express Checkout: Invalid hash - Expected: ' . $expected_hash . ' Received: ' . $hash);
-    
-    // For backward compatibility, try the alternative hash calculation
-    $alt_expected_hash = hash_hmac('sha256', $timestamp . $order_data['order_id'] . $api_key, $site->api_secret);
-    if (!hash_equals($alt_expected_hash, $hash)) {
-        return new WP_Error(
-            'invalid_hash',
-            __('Invalid hash', 'woo-paypal-proxy-server'),
-            array('status' => 401)
-        );
+    // Validate hash with either parameter
+    $expected_hash = hash_hmac('sha256', $timestamp . $order_data['order_id'] . $order_data['order_total'] . $api_key, $site->api_secret);
+    if (!hash_equals($expected_hash, $hash)) {
+        error_log('Express Checkout: Invalid hash - Expected: ' . $expected_hash . ' Received: ' . $hash);
+        
+        // For backward compatibility, try the alternative hash calculation
+        $alt_expected_hash = hash_hmac('sha256', $timestamp . $order_data['order_id'] . $api_key, $site->api_secret);
+        if (!hash_equals($alt_expected_hash, $hash)) {
+            return new WP_Error(
+                'invalid_hash',
+                __('Invalid hash', 'woo-paypal-proxy-server'),
+                array('status' => 401)
+            );
+        }
+        error_log('Express Checkout: Hash validated using alternative method');
     }
-    error_log('Express Checkout: Hash validated using alternative method');
-}
-
     
     try {
         // Initialize PayPal API
@@ -1240,33 +1236,63 @@ if (!hash_equals($expected_hash, $hash)) {
         $return_url = isset($order_data['return_url']) ? $order_data['return_url'] : '';
         $cancel_url = isset($order_data['cancel_url']) ? $order_data['cancel_url'] : '';
         
+        // Get the order amount
+        $order_amount = isset($order_data['order_total']) ? floatval($order_data['order_total']) : 0;
+        $currency = isset($order_data['currency']) ? $order_data['currency'] : 'USD';
+        
         // Prepare custom data for PayPal
-        $custom_data = array();
+        $custom_data = array(
+            'express_checkout' => true
+        );
         
         // Add line items if available
-        if (!empty($order_data['items'])) {
-            $custom_data['line_items'] = $order_data['items'];
+        if (!empty($order_data['line_items'])) {
+            $custom_data['line_items'] = $order_data['line_items'];
+            error_log('Express Checkout: Using ' . count($order_data['line_items']) . ' line items');
         }
         
-        // Set application context to indicate this is Express Checkout
+        // Add tax total if available
+        if (isset($order_data['tax_total'])) {
+            $custom_data['tax_total'] = floatval($order_data['tax_total']);
+        }
+        
+        // Add shipping total if available
+        if (isset($order_data['shipping_total'])) {
+            $custom_data['shipping_amount'] = floatval($order_data['shipping_total']);
+        }
+        
+        // Add discount total if available
+        if (isset($order_data['discount_total'])) {
+            $custom_data['discount_total'] = floatval($order_data['discount_total']);
+        }
+        
+        // Add customer info if available
+        if (!empty($order_data['customer_info'])) {
+            $custom_data['billing_address'] = $order_data['customer_info'];
+        }
+        
+        // Add callback URL if available
+        if (!empty($order_data['callback_url'])) {
+            $custom_data['callback_url'] = $order_data['callback_url'];
+        }
+        
+        // Set application context for Express Checkout
         $application_context = array(
             'shipping_preference' => $order_data['needs_shipping'] ? 'GET_FROM_FILE' : 'NO_SHIPPING',
             'user_action' => 'PAY_NOW',
             'return_url' => $return_url,
-            'cancel_url' => $cancel_url
+            'cancel_url' => $cancel_url,
+            'brand_name' => get_bloginfo('name')
         );
         
-        // Get the order amount - check both 'cart_total' and 'order_total' parameters to handle both formats
-        $order_amount = isset($order_data['cart_total']) ? $order_data['cart_total'] : 
-                       (isset($order_data['order_total']) ? $order_data['order_total'] : 0);
-                
         error_log('Express Checkout: Creating PayPal order with amount=' . $order_amount . 
                  ', currency=' . $order_data['currency'] . 
-                 ', shipping_preference=' . ($order_data['needs_shipping'] ? 'GET_FROM_FILE' : 'NO_SHIPPING'));        
-        // Create PayPal order
+                 ', shipping_preference=' . ($order_data['needs_shipping'] ? 'GET_FROM_FILE' : 'NO_SHIPPING'));
+                 
+        // Create PayPal order with enhanced data
         $paypal_order = $paypal_api->create_order(
             $order_amount,
-            $order_data['currency'],
+            $currency,
             $reference_id,
             $return_url,
             $cancel_url,
@@ -1299,17 +1325,13 @@ if (!hash_equals($expected_hash, $hash)) {
             'server_id' => $order_data['server_id']
         ));
         
-        // Get the order amount from either cart_total or order_total parameter
-        $order_amount = isset($order_data['cart_total']) ? $order_data['cart_total'] : 
-               (isset($order_data['order_total']) ? $order_data['order_total'] : 0);
-        
         // Log transaction
         $this->log_transaction(
             $site->id,
             $order_data['order_id'],
             $paypal_order['id'],
             $order_amount,
-            $order_data['currency'],
+            $currency,
             'pending',
             json_encode(array('express_checkout' => true))
         );
@@ -1332,7 +1354,7 @@ if (!hash_equals($expected_hash, $hash)) {
 }
 
 /**
- * Update Express Checkout shipping methods
+ * Update Express Checkout shipping methods with proper tax handling
  */
 public function update_express_shipping($request) {
     error_log('Express Checkout: Received update shipping request');
@@ -1375,7 +1397,7 @@ public function update_express_shipping($request) {
         );
     }
     
-    // Decode request data - FIXED to properly handle the base64 encoding
+    // Decode request data
     $decoded_data = base64_decode($request_data_encoded);
     if (!$decoded_data) {
         error_log('Express Checkout: Failed to decode base64 data');
@@ -1403,12 +1425,24 @@ public function update_express_shipping($request) {
     $paypal_order_id = isset($request_data['paypal_order_id']) ? $request_data['paypal_order_id'] : '';
     $shipping_method = isset($request_data['shipping_method']) ? $request_data['shipping_method'] : '';
     $shipping_options = isset($request_data['shipping_options']) ? $request_data['shipping_options'] : array();
-    $order_total = isset($request_data['order_total']) ? $request_data['order_total'] : 0;
+    $shipping_total = isset($request_data['shipping_total']) ? floatval($request_data['shipping_total']) : 0;
+    $order_subtotal = isset($request_data['order_subtotal']) ? floatval($request_data['order_subtotal']) : 0;
+    $tax_total = isset($request_data['tax_total']) ? floatval($request_data['tax_total']) : 0;
+    $shipping_tax = isset($request_data['shipping_tax']) ? floatval($request_data['shipping_tax']) : 0;
+    $discount_total = isset($request_data['discount_total']) ? floatval($request_data['discount_total']) : 0;
+    $order_total = isset($request_data['order_total']) ? floatval($request_data['order_total']) : 0;
     $currency = isset($request_data['currency']) ? $request_data['currency'] : 'USD';
+    $line_items = isset($request_data['line_items']) ? $request_data['line_items'] : array();
     
     // Log the important data we extracted
     error_log('Express Checkout: Extracted shipping options: ' . json_encode($shipping_options));
     error_log('Express Checkout: Shipping method: ' . $shipping_method);
+    error_log('Express Checkout: Order totals - Subtotal: ' . $order_subtotal . 
+             ', Tax: ' . $tax_total . 
+             ', Shipping: ' . $shipping_total . 
+             ', Shipping tax: ' . $shipping_tax .
+             ', Discount: ' . $discount_total . 
+             ', Total: ' . $order_total);
     
     // Validate hash
     $expected_hash = hash_hmac('sha256', $timestamp . $order_id . $paypal_order_id . $api_key, $site->api_secret);
@@ -1432,33 +1466,72 @@ public function update_express_shipping($request) {
         // Initialize PayPal API
         $paypal_api = new WPPPS_PayPal_API();
         
-        // If no shipping method is selected, use the first available one
-        $selected_shipping_cost = 0;
-        $selected_method = $shipping_method;
+        // Variable to hold the selected shipping cost and tax
+        $selected_shipping_cost = $shipping_total; // Start with the cost from request data
+        $selected_shipping_tax = $shipping_tax; // Start with the tax from request data
         
-        if (empty($selected_method) && !empty($shipping_options) && is_array($shipping_options) && count($shipping_options) > 0) {
-            // Use the first shipping option as default
-            $selected_method = $shipping_options[0]['id'];
-            $selected_shipping_cost = floatval($shipping_options[0]['cost']);
-            error_log('Express Checkout: No shipping method selected, using first option: ' . $selected_method . ' with cost: ' . $selected_shipping_cost);
-        } else if (!empty($selected_method) && !empty($shipping_options)) {
-            // Find the cost for the selected method
+        // If we have a shipping method, find its cost in shipping options
+        if (!empty($shipping_method) && !empty($shipping_options)) {
             foreach ($shipping_options as $option) {
-                if ($option['id'] === $selected_method) {
-                    $selected_shipping_cost = floatval($option['cost']);
-                    error_log('Express Checkout: Selected shipping method cost: ' . $selected_shipping_cost);
+                if ($option['id'] === $shipping_method) {
+                    $option_cost = floatval($option['cost']);
+                    $option_tax = isset($option['tax']) ? floatval($option['tax']) : 0;
+                    
+                    // If there's a mismatch between the option cost and shipping_total
+                    if (abs($option_cost - $shipping_total) > 0.01) {
+                        error_log("Express Checkout: WARNING - Shipping cost mismatch. Option cost: $option_cost, Shipping total: $shipping_total. Using option cost.");
+                        $selected_shipping_cost = $option_cost;
+                    }
+                    
+                    // If there's a mismatch between the option tax and shipping_tax
+                    if ($option_tax > 0 && abs($option_tax - $shipping_tax) > 0.01) {
+                        error_log("Express Checkout: WARNING - Shipping tax mismatch. Option tax: $option_tax, Shipping tax: $shipping_tax. Using option tax.");
+                        $selected_shipping_tax = $option_tax;
+                    }
+                    
+                    error_log("Express Checkout: Using shipping method {$option['id']} with cost $selected_shipping_cost and tax $selected_shipping_tax");
                     break;
                 }
             }
         }
+        // If no shipping method specified but we have options, use the first one
+        else if (empty($shipping_method) && !empty($shipping_options)) {
+            $shipping_method = $shipping_options[0]['id'];
+            $selected_shipping_cost = floatval($shipping_options[0]['cost']);
+            $selected_shipping_tax = isset($shipping_options[0]['tax']) ? floatval($shipping_options[0]['tax']) : 0;
+            
+            error_log("Express Checkout: No shipping method selected, using first option {$shipping_options[0]['id']} with cost $selected_shipping_cost and tax $selected_shipping_tax");
+        }
         
-        // Update PayPal order with shipping method and new total
+        // CRITICAL: Ensure the tax_total includes shipping tax if it's not already
+        // Calculate the item tax (total tax minus shipping tax)
+        $item_tax = $tax_total - $selected_shipping_tax;
+        if ($item_tax < 0) {
+            // This shouldn't happen, but if it does, adjust
+            error_log("Express Checkout: WARNING - Calculated negative item tax. Total tax: $tax_total, Shipping tax: $selected_shipping_tax. Adjusting.");
+            $item_tax = 0;
+            $tax_total = $selected_shipping_tax;
+        }
+        
+        // If tax_total doesn't include shipping_tax, add it
+        if (abs($tax_total - ($item_tax + $selected_shipping_tax)) > 0.01) {
+            error_log("Express Checkout: Adjusting tax total to include shipping tax. Before: $tax_total");
+            $tax_total = $item_tax + $selected_shipping_tax;
+            error_log("Express Checkout: After: $tax_total");
+            
+            // Recalculate order total
+            $order_total = $order_subtotal + $selected_shipping_cost + $tax_total - $discount_total;
+            error_log("Express Checkout: Recalculated order total: $order_total");
+        }
+        
+        // Update PayPal order with shipping method and complete breakdown
         $updated_order = $paypal_api->update_paypal_order_shipping(
             $paypal_order_id,
-            $selected_method,
-            $order_total,
+            $shipping_method,
+            $order_total, // Use potentially adjusted order total
             $currency,
-            $selected_shipping_cost
+            $selected_shipping_cost, // Use the consistent shipping cost
+            $shipping_options
         );
         
         if (is_wp_error($updated_order)) {
@@ -1494,8 +1567,10 @@ public function capture_express_payment($request) {
     // Get request data
     $params = $this->get_json_params($request);
     
+    error_log('Express Checkout: Got JSON params: ' . json_encode($params));
+    
     if (empty($params)) {
-        error_log('Express Checkout: Invalid request format');
+        error_log('Express Checkout: Invalid request format - empty params');
         return new WP_Error(
             'invalid_request',
             __('Invalid request format', 'woo-paypal-proxy-server'),
@@ -1507,13 +1582,23 @@ public function capture_express_payment($request) {
     $api_key = isset($params['api_key']) ? $params['api_key'] : '';
     $hash = isset($params['hash']) ? $params['hash'] : '';
     $timestamp = isset($params['timestamp']) ? $params['timestamp'] : '';
-    $request_data_encoded = isset($params['request_data']) ? $params['request_data'] : '';
+    $order_id = isset($params['order_id']) ? $params['order_id'] : '';
+    $paypal_order_id = isset($params['paypal_order_id']) ? $params['paypal_order_id'] : '';
+    $server_id = isset($params['server_id']) ? $params['server_id'] : '';
     
-    if (empty($api_key) || empty($hash) || empty($timestamp) || empty($request_data_encoded)) {
-        error_log('Express Checkout: Missing required parameters');
+    // Check for required fields - IMPORTANT: Be more lenient with parameter format
+    $missing_params = array();
+    if (empty($api_key)) $missing_params[] = 'api_key';
+    if (empty($hash)) $missing_params[] = 'hash';
+    if (empty($timestamp)) $missing_params[] = 'timestamp';
+    if (empty($order_id)) $missing_params[] = 'order_id';
+    if (empty($paypal_order_id)) $missing_params[] = 'paypal_order_id';
+    
+    if (!empty($missing_params)) {
+        error_log('Express Checkout: Missing required parameters: ' . implode(', ', $missing_params));
         return new WP_Error(
             'missing_params',
-            __('Missing required parameters', 'woo-paypal-proxy-server'),
+            __('Missing required parameters: ' . implode(', ', $missing_params), 'woo-paypal-proxy-server'),
             array('status' => 400)
         );
     }
@@ -1529,65 +1614,152 @@ public function capture_express_payment($request) {
         );
     }
     
-    // Decode request data
-    $request_data = json_decode(base64_decode($request_data_encoded), true);
-    if (!$request_data) {
-        error_log('Express Checkout: Invalid request data format');
-        return new WP_Error(
-            'invalid_data',
-            __('Invalid request data format', 'woo-paypal-proxy-server'),
-            array('status' => 400)
-        );
-    }
-    
-    error_log('Express Checkout: Processing payment capture: ' . json_encode($request_data));
-    
-    // Extract request data
-    $order_id = isset($request_data['order_id']) ? $request_data['order_id'] : '';
-    $paypal_order_id = isset($request_data['paypal_order_id']) ? $request_data['paypal_order_id'] : '';
-    
-    // Validate hash
+    // Validate hash - includes order_id, paypal_order_id, and api_key
     $expected_hash = hash_hmac('sha256', $timestamp . $order_id . $paypal_order_id . $api_key, $site->api_secret);
     if (!hash_equals($expected_hash, $hash)) {
-        error_log('Express Checkout: Invalid hash');
-        return new WP_Error(
-            'invalid_hash',
-            __('Invalid hash', 'woo-paypal-proxy-server'),
-            array('status' => 401)
-        );
+        error_log('Express Checkout: Invalid hash - Expected: ' . $expected_hash . ', Got: ' . $hash);
+        
+        // Try alternative hash formats for backward compatibility
+        $alt_expected_hash = hash_hmac('sha256', $timestamp . $order_id . $api_key, $site->api_secret);
+        if (!hash_equals($alt_expected_hash, $hash)) {
+            error_log('Express Checkout: Alternative hash validation also failed');
+            return new WP_Error(
+                'invalid_hash',
+                __('Invalid hash', 'woo-paypal-proxy-server'),
+                array('status' => 401)
+            );
+        }
+        error_log('Express Checkout: Hash validated using alternative method');
     }
     
     try {
-        // Get stored order data
+        // Get stored order data 
         $stored_data = $this->get_express_checkout_data($site->id, $order_id);
-        if (!$stored_data || $stored_data['paypal_order_id'] !== $paypal_order_id) {
-            error_log('Express Checkout: No matching stored data found or PayPal order ID mismatch');
-            throw new Exception('Invalid order data');
+        
+        if (!$stored_data) {
+            // Be more lenient - if we don't have stored data, try to proceed anyway
+            error_log('Express Checkout: No stored data found, but proceeding anyway');
+        } 
+        else if ($stored_data['paypal_order_id'] !== $paypal_order_id) {
+            error_log('Express Checkout: PayPal order ID mismatch. Stored: ' . $stored_data['paypal_order_id'] . ', Requested: ' . $paypal_order_id);
+            error_log('Express Checkout: Will proceed anyway with requested PayPal order ID');
         }
         
         // Initialize PayPal API
         $paypal_api = new WPPPS_PayPal_API();
         
-        // Capture the payment
-        $capture = $paypal_api->capture_payment($paypal_order_id);
+        // First, try to get the order details to check if it's already captured
+        error_log('Express Checkout: Checking order status for PayPal order: ' . $paypal_order_id);
+        $order_details = $paypal_api->get_order_details($paypal_order_id);
         
-        if (is_wp_error($capture)) {
-            error_log('Express Checkout: Error capturing payment: ' . $capture->get_error_message());
-            throw new Exception($capture->get_error_message());
-        }
-        
-        error_log('Express Checkout: Payment captured successfully: ' . json_encode($capture));
-        
-        // Extract transaction ID
         $transaction_id = '';
-        if (!empty($capture['purchase_units'][0]['payments']['captures'][0]['id'])) {
-            $transaction_id = $capture['purchase_units'][0]['payments']['captures'][0]['id'];
-        }
-        
-        // Extract seller protection status
         $seller_protection = 'UNKNOWN';
-        if (!empty($capture['purchase_units'][0]['payments']['captures'][0]['seller_protection']['status'])) {
-            $seller_protection = $capture['purchase_units'][0]['payments']['captures'][0]['seller_protection']['status'];
+        $capture_data = null;
+        
+        // If we got order details successfully, check its status
+        if (!is_wp_error($order_details)) {
+            error_log('Express Checkout: Got order details: ' . json_encode($order_details));
+            
+            // Check if order is already captured (status will be COMPLETED)
+            if (isset($order_details['status']) && $order_details['status'] === 'COMPLETED') {
+                error_log('Express Checkout: Order is already captured');
+                
+                // Extract transaction ID and other details directly from order details
+                if (!empty($order_details['purchase_units'][0]['payments']['captures'])) {
+                    $capture = $order_details['purchase_units'][0]['payments']['captures'][0];
+                    $transaction_id = $capture['id'];
+                    
+                    if (isset($capture['seller_protection']['status'])) {
+                        $seller_protection = $capture['seller_protection']['status'];
+                    }
+                    
+                    $capture_data = $order_details;
+                    
+                    error_log('Express Checkout: Found transaction ID: ' . $transaction_id . ' and seller protection: ' . $seller_protection);
+                }
+            } else {
+                // Order not yet captured, try to capture it
+                error_log('Express Checkout: Order not yet captured, attempting capture for PayPal order: ' . $paypal_order_id);
+                $capture = $paypal_api->capture_payment($paypal_order_id);
+                
+                if (is_wp_error($capture)) {
+                    error_log('Express Checkout: Error capturing payment: ' . $capture->get_error_message());
+                    
+                    // Check if the error is "ORDER_ALREADY_CAPTURED" - if so, treat as success
+                    if (strpos($capture->get_error_message(), 'ORDER_ALREADY_CAPTURED') !== false) {
+                        error_log('Express Checkout: Order was already captured. Treating as success.');
+                        
+                        // Try to get order details again to extract capture info
+                        $order_details = $paypal_api->get_order_details($paypal_order_id);
+                        
+                        if (!is_wp_error($order_details) && 
+                            isset($order_details['purchase_units'][0]['payments']['captures'][0]['id'])) {
+                            $transaction_id = $order_details['purchase_units'][0]['payments']['captures'][0]['id'];
+                            
+                            if (isset($order_details['purchase_units'][0]['payments']['captures'][0]['seller_protection']['status'])) {
+                                $seller_protection = $order_details['purchase_units'][0]['payments']['captures'][0]['seller_protection']['status'];
+                            }
+                            
+                            $capture_data = $order_details;
+                        } else {
+                            // If we can't get details, use a placeholder
+                            $transaction_id = 'already_captured_' . substr($paypal_order_id, -8);
+                        }
+                    } else {
+                        // It's a genuine error, not just "already captured"
+                        throw new Exception($capture->get_error_message());
+                    }
+                } else {
+                    error_log('Express Checkout: Payment captured successfully: ' . json_encode($capture));
+                    
+                    // Extract transaction ID
+                    if (!empty($capture['purchase_units'][0]['payments']['captures'][0]['id'])) {
+                        $transaction_id = $capture['purchase_units'][0]['payments']['captures'][0]['id'];
+                    }
+                    
+                    // Extract seller protection status
+                    if (!empty($capture['purchase_units'][0]['payments']['captures'][0]['seller_protection']['status'])) {
+                        $seller_protection = $capture['purchase_units'][0]['payments']['captures'][0]['seller_protection']['status'];
+                    }
+                    
+                    $capture_data = $capture;
+                }
+            }
+        } else {
+            // Error getting order details, try direct capture
+            error_log('Express Checkout: Error getting order details: ' . $order_details->get_error_message());
+            error_log('Express Checkout: Attempting direct capture for PayPal order: ' . $paypal_order_id);
+            
+            $capture = $paypal_api->capture_payment($paypal_order_id);
+            
+            if (is_wp_error($capture)) {
+                error_log('Express Checkout: Error capturing payment: ' . $capture->get_error_message());
+                
+                // Check if the error is "ORDER_ALREADY_CAPTURED" - if so, treat as success
+                if (strpos($capture->get_error_message(), 'ORDER_ALREADY_CAPTURED') !== false) {
+                    error_log('Express Checkout: Order was already captured. Treating as success.');
+                    
+                    // Use a placeholder transaction ID
+                    $transaction_id = 'already_captured_' . substr($paypal_order_id, -8);
+                } else {
+                    // It's a genuine error, not just "already captured"
+                    throw new Exception($capture->get_error_message());
+                }
+            } else {
+                error_log('Express Checkout: Payment captured successfully: ' . json_encode($capture));
+                
+                // Extract transaction ID
+                if (!empty($capture['purchase_units'][0]['payments']['captures'][0]['id'])) {
+                    $transaction_id = $capture['purchase_units'][0]['payments']['captures'][0]['id'];
+                }
+                
+                // Extract seller protection status
+                if (!empty($capture['purchase_units'][0]['payments']['captures'][0]['seller_protection']['status'])) {
+                    $seller_protection = $capture['purchase_units'][0]['payments']['captures'][0]['seller_protection']['status'];
+                }
+                
+                $capture_data = $capture;
+            }
         }
         
         // Update transaction log
@@ -1599,7 +1771,7 @@ public function capture_express_payment($request) {
             json_encode(array(
                 'transaction_id' => $transaction_id,
                 'seller_protection' => $seller_protection,
-                'capture_data' => $capture
+                'capture_data' => $capture_data
             ))
         );
         

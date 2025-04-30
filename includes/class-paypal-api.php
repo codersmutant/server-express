@@ -829,64 +829,24 @@ public function create_order($amount, $currency = 'USD', $reference_id = '', $re
     // Express checkout flag
     $is_express = !empty($custom_data['express_checkout']) || !empty($application_context);
     
-    // Build request body with basic structure
-    $payload = array(
-        'intent' => 'CAPTURE',
-        'purchase_units' => array(
-            array(
-                'amount' => array(
-                    'currency_code' => $currency,
-                    'value' => number_format($amount, 2, '.', ''),
-                ),
-            ),
-        )
-    );
-    
-    // Add application context for Express Checkout
-    if (!empty($application_context)) {
-        $this->log_info('Using provided application context for Express Checkout');
-        $payload['application_context'] = $application_context;
-    } else {
-        // Default application context
-        $payload['application_context'] = array(
-            'shipping_preference' => !empty($custom_data['shipping_address']) ? 'SET_PROVIDED_ADDRESS' : 'GET_FROM_FILE',
-            'user_action' => 'PAY_NOW',
-            'return_url' => $return_url,
-            'cancel_url' => $cancel_url,
-            'brand_name' => get_bloginfo('name'),
-            'landing_page' => 'BILLING',
-        );
-    }
-    
-    // Add reference ID if provided
-    if (!empty($reference_id)) {
-        $payload['purchase_units'][0]['reference_id'] = $reference_id;
-    }
-    
-    // Add description if provided
-    if (!empty($custom_data['description'])) {
-        $payload['purchase_units'][0]['description'] = $custom_data['description'];
-        $this->log_info('Adding description to PayPal API request: ' . $custom_data['description']);
-    }
-    
     // Process line items if available
     $has_line_items = !empty($custom_data['line_items']) && is_array($custom_data['line_items']);
     $this->log_info('Processing line items: ' . ($has_line_items ? 'Yes' : 'No'));
     
+    // Initialize breakdown values
+    $item_total = 0;
+    $tax_total = 0;
+    $shipping_total = isset($custom_data['shipping_amount']) ? floatval($custom_data['shipping_amount']) : 0;
+    $shipping_tax = isset($custom_data['shipping_tax']) ? floatval($custom_data['shipping_tax']) : 0;
+    $discount_total = isset($custom_data['discount_total']) ? floatval($custom_data['discount_total']) : 0;
+    $handling_total = 0;
+    $tax_total += $shipping_tax;
+    
+    // Prepare items array for PayPal
+    $items = array();
+    
     if ($has_line_items) {
         $this->log_info('Number of line items: ' . count($custom_data['line_items']));
-        
-        // Initialize amounts for breakdown
-        $item_total = 0;
-        $tax_total = 0;
-        $shipping_total = isset($custom_data['shipping_amount']) ? floatval($custom_data['shipping_amount']) : 0;
-        $shipping_tax = isset($custom_data['shipping_tax']) ? floatval($custom_data['shipping_tax']) : 0;
-        $tax_total += $shipping_tax;
-
-        $this->log_info('Initial shipping amount: ' . $shipping_total);
-        
-        // Prepare items array for PayPal
-        $items = array();
         
         foreach ($custom_data['line_items'] as $item) {
             // Validate item data
@@ -912,189 +872,204 @@ public function create_order($amount, $currency = 'USD', $reference_id = '', $re
             // Create the item for PayPal
             $paypal_item = array(
                 'name' => substr($item['name'], 0, 127), // PayPal limits name to 127 chars
+                'quantity' => $quantity,
                 'unit_amount' => array(
                     'currency_code' => $currency,
                     'value' => number_format($unit_price, 2, '.', '')
-                ),
-                'quantity' => $quantity
+                )
             );
             
             // Add description if available
             if (!empty($item['description'])) {
                 $paypal_item['description'] = substr($item['description'], 0, 127);
+            } else if (!empty($item['product_id'])) {
+                $paypal_item['description'] = 'Product ID: ' . $item['product_id'];
             }
             
             // Add SKU if available
             if (!empty($item['sku'])) {
                 $paypal_item['sku'] = substr($item['sku'], 0, 50);
+            } else if (!empty($item['product_id'])) {
+                $paypal_item['sku'] = $item['product_id'];
             }
             
             $items[] = $paypal_item;
             $this->log_info('Added item: ' . $item['name'] . ' x ' . $quantity . ' @ ' . $unit_price);
         }
-        
-        // Log the breakdown totals
-        $this->log_info('Calculated item_total: ' . $item_total);
-        $this->log_info('Calculated tax_total: ' . $tax_total);
-        $this->log_info('Calculated shipping_total: ' . $shipping_total);
-        
-        // Apply the breakdown only if we have valid totals
-        if (!empty($items) && $item_total > 0) {
-            // Create breakdown with correct values
-            $breakdown = array(
-                'item_total' => array(
-                    'currency_code' => $currency,
-                    'value' => number_format($item_total, 2, '.', '')
-                )
-            );
-            
-            // Only add tax if it's greater than zero
-            if ($tax_total > 0) {
-                $breakdown['tax_total'] = array(
-                    'currency_code' => $currency,
-                    'value' => number_format($tax_total, 2, '.', '')
-                );
-            }
-            
-            // Only add shipping if it's greater than zero
-            if ($shipping_total > 0) {
-                $breakdown['shipping'] = array(
-                    'currency_code' => $currency,
-                    'value' => number_format($shipping_total, 2, '.', '')
-                );
-            } else {
-                // Still include shipping with zero value for clarity in Express Checkout
-                $breakdown['shipping'] = array(
-                    'currency_code' => $currency,
-                    'value' => '0.00'
-                );
-            }
-            
-            // Calculate expected total
-            $expected_total = $item_total + $shipping_total + $tax_total;
-            $actual_total = floatval($amount);
-            
-            $this->log_info('Expected total: ' . $expected_total);
-            $this->log_info('Actual total: ' . $actual_total);
-            
-            // If the totals don't match, adjust one of the components to make it balance
-            if (abs($expected_total - $actual_total) > 0.01) {
-                $this->log_info('Totals don\'t match. Adjusting...');
-                
-                // Calculate the difference
-                $difference = $actual_total - $expected_total;
-                
-                // If shipping is present, adjust it first
-                if ($shipping_total > 0) {
-                    $shipping_total += $difference;
-                    $breakdown['shipping']['value'] = number_format($shipping_total, 2, '.', '');
-                    $this->log_info('Adjusted shipping to: ' . $shipping_total);
-                } 
-                // Otherwise, adjust item_total
-                else {
-                    $item_total += $difference;
-                    $breakdown['item_total']['value'] = number_format($item_total, 2, '.', '');
-                    $this->log_info('Adjusted item_total to: ' . $item_total);
-                }
-            }
-            
-            // Set the breakdown and items in the payload
-            $payload['purchase_units'][0]['amount']['breakdown'] = $breakdown;
-            $payload['purchase_units'][0]['items'] = $items;
-            
-            $this->log_info('Added breakdown and ' . count($items) . ' line items to payload');
-        } else {
-            $this->log_info('No valid items or item_total is zero, skipping detailed breakdown');
-        }
     }
-    // Even if no line items, still add shipping breakdown if available
-    else if (isset($custom_data['shipping_amount']) && floatval($custom_data['shipping_amount']) > 0) {
-        $shipping_total = floatval($custom_data['shipping_amount']);
-        $item_total = floatval($amount) - $shipping_total;
+    
+    // Create complete breakdown
+    $breakdown = array();
+    
+    // Always include item_total
+    $breakdown['item_total'] = array(
+        'currency_code' => $currency,
+        'value' => number_format($item_total > 0 ? $item_total : $amount, 2, '.', '')
+    );
+    
+    // Include tax_total if applicable
+    if ($tax_total > 0) {
+        $breakdown['tax_total'] = array(
+            'currency_code' => $currency,
+            'value' => number_format($tax_total, 2, '.', '')
+        );
+    }
+    
+    // Always include shipping
+    $breakdown['shipping'] = array(
+        'currency_code' => $currency,
+        'value' => number_format($shipping_total, 2, '.', '')
+    );
+    
+    // Include discount if applicable
+    if ($discount_total > 0) {
+        $breakdown['discount'] = array(
+            'currency_code' => $currency,
+            'value' => number_format($discount_total, 2, '.', '')
+        );
+    } else {
+        // Add zero discount for full structure
+        $breakdown['discount'] = array(
+            'currency_code' => $currency,
+            'value' => '0.00'
+        );
+    }
+    
+    // Include handling
+    $breakdown['handling'] = array(
+        'currency_code' => $currency,
+        'value' => number_format($handling_total, 2, '.', '')
+    );
+    
+    // Calculate expected total (should match amount parameter)
+    $expected_total = $item_total + $shipping_total + $tax_total - $discount_total + $handling_total;
+    $actual_total = floatval($amount);
+    
+    // Adjust if totals don't match
+    if (abs($expected_total - $actual_total) > 0.01) {
+        $this->log_info("Totals don't match. Expected: $expected_total, Actual: $actual_total");
+        // Difference between actual and expected
+        $difference = $actual_total - $expected_total;
         
-        if ($item_total >= 0) {
-            $payload['purchase_units'][0]['amount']['breakdown'] = array(
-                'item_total' => array(
-                    'currency_code' => $currency,
-                    'value' => number_format($item_total, 2, '.', '')
-                ),
-                'shipping' => array(
-                    'currency_code' => $currency,
-                    'value' => number_format($shipping_total, 2, '.', '')
-                ),
-                'tax_total' => array(
-                    'currency_code' => $currency,
-                    'value' => '0.00'
-                )
-            );
-            
-            $this->log_info('Added basic breakdown with shipping: ' . $shipping_total);
+        // If we have line items, adjust one of the components to balance
+        if ($has_line_items) {
+            if ($shipping_total > 0) {
+                // Adjust shipping first if possible
+                $shipping_total += $difference;
+                $breakdown['shipping']['value'] = number_format($shipping_total, 2, '.', '');
+                $this->log_info('Adjusted shipping to: ' . $shipping_total);
+            } elseif ($tax_total > 0) {
+                // Otherwise adjust tax
+                $tax_total += $difference;
+                $breakdown['tax_total']['value'] = number_format($tax_total, 2, '.', '');
+                $this->log_info('Adjusted tax_total to: ' . $tax_total);
+            } else {
+                // Last resort: adjust item_total
+                $item_total += $difference;
+                $breakdown['item_total']['value'] = number_format($item_total, 2, '.', '');
+                $this->log_info('Adjusted item_total to: ' . $item_total);
+            }
         }
     }
     
-    // Add billing address if provided
+    // Build purchase units array
+    $purchase_unit = array(
+        'amount' => array(
+            'currency_code' => $currency,
+            'value' => number_format($amount, 2, '.', ''),
+            'breakdown' => $breakdown
+        )
+    );
+    
+    // Add reference ID if provided or use 'default'
+    $purchase_unit['reference_id'] = !empty($reference_id) ? $reference_id : 'default';
+    
+    // Add line items if available
+    if (!empty($items)) {
+        $purchase_unit['items'] = $items;
+    }
+    
+    // Build complete request body
+    $payload = array(
+        'intent' => 'CAPTURE',
+        'purchase_units' => array($purchase_unit)
+    );
+    
+    // Add payer information if available
     if (!empty($custom_data['billing_address'])) {
-        $this->log_info('Adding billing address to PayPal request');
-        
         $billing = $custom_data['billing_address'];
         
-        // Add payer information with billing address
         $payload['payer'] = array(
             'name' => array(
                 'given_name' => $billing['first_name'],
                 'surname' => $billing['last_name']
-            ),
-            'email_address' => !empty($billing['email']) ? $billing['email'] : '',
-            'phone' => !empty($billing['phone']) ? array(
+            )
+        );
+        
+        if (!empty($billing['email'])) {
+            $payload['payer']['email_address'] = $billing['email'];
+        }
+        
+        if (!empty($billing['phone'])) {
+            $payload['payer']['phone'] = array(
                 'phone_number' => array(
                     'national_number' => preg_replace('/[^0-9]/', '', $billing['phone'])
                 )
-            ) : null,
-            'address' => array(
+            );
+        }
+        
+        if (!empty($billing['address_1'])) {
+            $payload['payer']['address'] = array(
                 'address_line_1' => $billing['address_1'],
                 'address_line_2' => $billing['address_2'] ?: '',
-                'admin_area_2' => $billing['city'],           // City
-                'admin_area_1' => $billing['state'],          // State
+                'admin_area_2' => $billing['city'],
+                'admin_area_1' => $billing['state'],
                 'postal_code' => $billing['postcode'],
-                'country_code' => $billing['country']         // Country code
-            )
-        );
+                'country_code' => $billing['country']
+            );
+        }
     }
     
     // Add shipping address if provided
     if (!empty($custom_data['shipping_address'])) {
-        $this->log_info('Adding shipping address to PayPal request');
-        
-        // Format shipping address according to PayPal API specifications
         $shipping = $custom_data['shipping_address'];
         
-        // Create properly formatted shipping data for PayPal
-        $formatted_shipping = array(
+        $purchase_unit['shipping'] = array(
             'name' => array(
                 'full_name' => $shipping['first_name'] . ' ' . $shipping['last_name']
             ),
             'address' => array(
                 'address_line_1' => $shipping['address_1'],
                 'address_line_2' => $shipping['address_2'] ?: '',
-                'admin_area_2' => $shipping['city'],           // City
-                'admin_area_1' => $shipping['state'],          // State
+                'admin_area_2' => $shipping['city'],
+                'admin_area_1' => $shipping['state'],
                 'postal_code' => $shipping['postcode'],
-                'country_code' => $shipping['country']         // Country code
+                'country_code' => $shipping['country']
             )
         );
         
-        // Add shipping to payload
-        $payload['purchase_units'][0]['shipping'] = $formatted_shipping;
+        // Update purchase_units with shipping info
+        $payload['purchase_units'][0] = $purchase_unit;
     }
     
-    // Add shipping callback URL if this is for Express Checkout and has a callback
-    if ($is_express && !empty($custom_data['callback_url'])) {
-        $this->log_info('Adding shipping callback URL for Express Checkout');
-        if (!isset($payload['application_context'])) {
-            $payload['application_context'] = array();
+    // Add application context - this controls the flow in PayPal's interface
+    if (!empty($application_context)) {
+        $payload['application_context'] = $application_context;
+    } else {
+        $payload['application_context'] = array(
+            'shipping_preference' => !empty($custom_data['shipping_address']) ? 'SET_PROVIDED_ADDRESS' : 'GET_FROM_FILE',
+            'user_action' => 'PAY_NOW',
+            'brand_name' => get_bloginfo('name')
+        );
+        
+        // Add return and cancel URLs if provided
+        if (!empty($return_url)) {
+            $payload['application_context']['return_url'] = $return_url;
         }
         
-        $payload['application_context']['shipping_preference'] = 'GET_FROM_FILE';
+        if (!empty($cancel_url)) {
+            $payload['application_context']['cancel_url'] = $cancel_url;
+        }
     }
     
     // Set up request arguments
@@ -1143,9 +1118,9 @@ public function create_order($amount, $currency = 'USD', $reference_id = '', $re
 }
 
 /**
- * Update PayPal order with shipping information
+ * Update PayPal order with shipping information with proper tax handling
  */
-public function update_paypal_order_shipping($paypal_order_id, $shipping_option_id, $amount, $currency = 'USD', $shipping_cost = 0) {
+public function update_paypal_order_shipping($paypal_order_id, $shipping_option_id, $amount, $currency = 'USD', $shipping_cost = 0, $shipping_options = array()) {
     // Get access token
     $access_token = $this->get_access_token();
     
@@ -1156,7 +1131,7 @@ public function update_paypal_order_shipping($paypal_order_id, $shipping_option_
     // Set API endpoint
     $endpoint = $this->api_url . '/v2/checkout/orders/' . $paypal_order_id;
     
-    // First, get the current order details
+    // First, get the current order details to preserve information
     $current_order = $this->get_order_details($paypal_order_id);
     
     if (is_wp_error($current_order)) {
@@ -1166,43 +1141,189 @@ public function update_paypal_order_shipping($paypal_order_id, $shipping_option_
     
     $this->log_info('Retrieved current order details for update: ' . json_encode($current_order));
     
-    // Extract the reference ID from the response
-    $reference_id = $current_order['purchase_units'][0]['reference_id'];
+    // Extract reference ID from the response or use default
+    $reference_id = isset($current_order['purchase_units'][0]['reference_id']) ? 
+        $current_order['purchase_units'][0]['reference_id'] : 'default';
     
-    // Check if we have a valid shipping cost
-    if ($shipping_cost <= 0 && !empty($shipping_options) && is_array($shipping_options)) {
+    // Extract any existing items from the order
+    $items = isset($current_order['purchase_units'][0]['items']) ? 
+        $current_order['purchase_units'][0]['items'] : array();
+    
+    // Calculate the base amount (items only)
+    $item_total = isset($current_order['purchase_units'][0]['amount']['breakdown']['item_total']['value']) ? 
+        floatval($current_order['purchase_units'][0]['amount']['breakdown']['item_total']['value']) : $amount - $shipping_cost;
+    
+    // Calculate tax amount - initially include only product tax
+    $tax_total = isset($current_order['purchase_units'][0]['amount']['breakdown']['tax_total']['value']) ? 
+        floatval($current_order['purchase_units'][0]['amount']['breakdown']['tax_total']['value']) : 0;
+    
+    // Get discount if available
+    $discount = isset($current_order['purchase_units'][0]['amount']['breakdown']['discount']['value']) ? 
+        floatval($current_order['purchase_units'][0]['amount']['breakdown']['discount']['value']) : 0;
+    
+    // Get handling if available
+    $handling = isset($current_order['purchase_units'][0]['amount']['breakdown']['handling']['value']) ? 
+        floatval($current_order['purchase_units'][0]['amount']['breakdown']['handling']['value']) : 0;
+    
+    // Format shipping options for PayPal if provided
+    $paypal_shipping_options = array();
+    $selected_shipping_cost = 0;
+    $shipping_tax = 0; // Initialize shipping tax
+    
+    if (!empty($shipping_options)) {
+        // Find if we have the selected shipping option in our array
+        $selected_option = null;
+        
         foreach ($shipping_options as $option) {
-            if (isset($option['cost'])) {
-                $shipping_cost = floatval($option['cost']);
-                $this->log_info("Found shipping cost from options: $shipping_cost");
-                break;
+            // Convert option cost to float to ensure accurate comparison
+            $option_cost = floatval($option['cost']);
+            
+            // Create the PayPal format option
+            $paypal_option = array(
+                'id' => $option['id'],
+                'label' => $option['label'],
+                'type' => 'SHIPPING',
+                'selected' => ($option['id'] === $shipping_option_id),
+                'amount' => array(
+                    'value' => number_format($option_cost, 2, '.', ''),
+                    'currency_code' => $currency
+                )
+            );
+            
+            $paypal_shipping_options[] = $paypal_option;
+            
+            // If this is the selected option, store its cost and tax
+            if ($option['id'] === $shipping_option_id) {
+                $selected_option = $option;
+                $selected_shipping_cost = $option_cost;
+                
+                // CRITICAL: Extract shipping tax if available
+                if (isset($option['tax'])) {
+                    $shipping_tax = floatval($option['tax']);
+                    $this->log_info("Found shipping tax: {$shipping_tax} for option {$option['label']}");
+                }
+                
+                $this->log_info("Found selected shipping option: {$option['label']} with cost {$option_cost}");
             }
+        }
+        
+        // If we didn't find the selected option in our array but have a shipping_option_id
+        if (!$selected_option && !empty($shipping_option_id) && !empty($shipping_cost)) {
+            $selected_shipping_cost = floatval($shipping_cost);
+            $this->log_info("Using provided shipping cost: {$selected_shipping_cost}");
+        }
+        // If we still don't have a selected option but have options, select the first one
+        else if (!$selected_option && !empty($paypal_shipping_options)) {
+            $paypal_shipping_options[0]['selected'] = true;
+            $selected_shipping_cost = floatval($shipping_options[0]['cost']);
+            
+            // Extract shipping tax from the first option if available
+            if (isset($shipping_options[0]['tax'])) {
+                $shipping_tax = floatval($shipping_options[0]['tax']);
+                $this->log_info("Using shipping tax from first option: {$shipping_tax}");
+            }
+            
+            $this->log_info("No selected option provided, using first option with cost: {$selected_shipping_cost}");
         }
     }
     
-    // CRITICAL FIX: Calculate the CORRECT total by adding shipping to the amount
-    $total_with_shipping = floatval($amount) + floatval($shipping_cost);
-    $this->log_info("Updating PayPal order - Base amount: $amount, Shipping: $shipping_cost, Total: $total_with_shipping");
-   
-    // Prepare the patch request to update shipping option and amounts
+    // CRITICAL: Add shipping tax to the total tax amount
+    if ($shipping_tax > 0) {
+        $this->log_info("Adding shipping tax {$shipping_tax} to product tax {$tax_total}");
+        $tax_total += $shipping_tax;
+        $this->log_info("New total tax amount: {$tax_total}");
+    }
+    
+    // CRITICAL: Use the actual selected shipping cost, not the passed-in shipping_cost parameter
+    $shipping_total = $selected_shipping_cost;
+    $this->log_info("Using shipping cost for breakdown: {$shipping_total}");
+    
+    // Recalculate the total with the correct shipping cost and tax
+    $recalculated_total = $item_total + $shipping_total + $tax_total - $discount + $handling;
+    $this->log_info("Recalculated total: {$recalculated_total} (item_total:{$item_total} + shipping:{$shipping_total} + tax:{$tax_total} - discount:{$discount} + handling:{$handling})");
+    
+    // If the recalculated total doesn't match the input amount, log a warning
+    if (abs($recalculated_total - floatval($amount)) > 0.01) {
+        $this->log_info("Warning: Recalculated total ($recalculated_total) doesn't match input amount ($amount). Using recalculated total.");
+        // Use the recalculated amount instead of the input amount
+        $amount = $recalculated_total;
+    }
+    
+    // Prepare the full purchase unit for the PATCH request
+    $purchase_unit = array(
+        'amount' => array(
+            'value' => number_format(floatval($amount), 2, '.', ''),
+            'currency_code' => $currency,
+            'breakdown' => array(
+                'item_total' => array(
+                    'currency_code' => $currency,
+                    'value' => number_format($item_total, 2, '.', '')
+                ),
+                'shipping' => array(
+                    'currency_code' => $currency,
+                    'value' => number_format($shipping_total, 2, '.', '')
+                ),
+                'tax_total' => array(
+                    'currency_code' => $currency,
+                    'value' => number_format($tax_total, 2, '.', '')
+                )
+            )
+        ),
+        'reference_id' => $reference_id
+    );
+    
+    // Add discount if we have it
+    if ($discount > 0) {
+        $purchase_unit['amount']['breakdown']['discount'] = array(
+            'currency_code' => $currency,
+            'value' => number_format($discount, 2, '.', '')
+        );
+    } else {
+        $purchase_unit['amount']['breakdown']['discount'] = array(
+            'currency_code' => $currency,
+            'value' => '0.00'
+        );
+    }
+    
+    // Add handling
+    $purchase_unit['amount']['breakdown']['handling'] = array(
+        'currency_code' => $currency,
+        'value' => number_format($handling, 2, '.', '')
+    );
+    
+    // Include the items if we have them
+    if (!empty($items)) {
+        $purchase_unit['items'] = $items;
+    }
+    
+    // Include shipping options if available
+    if (!empty($paypal_shipping_options)) {
+        $purchase_unit['shipping'] = array(
+            'options' => $paypal_shipping_options
+        );
+        
+        // Add shipping address from original order if available
+        if (isset($current_order['purchase_units'][0]['shipping']['address'])) {
+            $purchase_unit['shipping']['address'] = $current_order['purchase_units'][0]['shipping']['address'];
+        }
+        
+        // Add shipping name from original order if available
+        if (isset($current_order['purchase_units'][0]['shipping']['name'])) {
+            $purchase_unit['shipping']['name'] = $current_order['purchase_units'][0]['shipping']['name'];
+        }
+    }
+    
+    // Get payee information from original order if available
+    if (isset($current_order['purchase_units'][0]['payee'])) {
+        $purchase_unit['payee'] = $current_order['purchase_units'][0]['payee'];
+    }
+    
+    // Create the PATCH operation
     $patches = array(
         array(
             'op' => 'replace',
-            'path' => "/purchase_units/@reference_id=='$reference_id'/amount",
-            'value' => array(
-                'currency_code' => $currency,
-                'value' => number_format($total_with_shipping, 2, '.', ''),  // FIXED: Now includes shipping
-                'breakdown' => array(
-                    'item_total' => array(
-                        'currency_code' => $currency,
-                        'value' => number_format($amount, 2, '.', '')  // Keep original amount as item_total
-                    ),
-                    'shipping' => array(
-                        'currency_code' => $currency,
-                        'value' => number_format($shipping_cost, 2, '.', '')  // FIXED: Now uses actual shipping cost
-                    )
-                )
-            )
+            'path' => "/purchase_units/@reference_id=='{$reference_id}'",
+            'value' => $purchase_unit
         )
     );
     

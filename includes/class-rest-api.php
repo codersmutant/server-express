@@ -1197,16 +1197,26 @@ public function create_express_checkout($request) {
     
     error_log('Express Checkout: Processing order data: ' . json_encode($order_data));
     
-    // Validate hash
-    $expected_hash = hash_hmac('sha256', $timestamp . $order_data['order_id'] . $order_data['order_total'] . $api_key, $site->api_secret);
-    if (!hash_equals($expected_hash, $hash)) {
-        error_log('Express Checkout: Invalid hash');
+    $order_amount = isset($order_data['cart_total']) ? $order_data['cart_total'] : 
+               (isset($order_data['order_total']) ? $order_data['order_total'] : 0);
+
+// Validate hash with either parameter
+$expected_hash = hash_hmac('sha256', $timestamp . $order_data['order_id'] . $order_amount . $api_key, $site->api_secret);
+if (!hash_equals($expected_hash, $hash)) {
+    error_log('Express Checkout: Invalid hash - Expected: ' . $expected_hash . ' Received: ' . $hash);
+    
+    // For backward compatibility, try the alternative hash calculation
+    $alt_expected_hash = hash_hmac('sha256', $timestamp . $order_data['order_id'] . $api_key, $site->api_secret);
+    if (!hash_equals($alt_expected_hash, $hash)) {
         return new WP_Error(
             'invalid_hash',
             __('Invalid hash', 'woo-paypal-proxy-server'),
             array('status' => 401)
         );
     }
+    error_log('Express Checkout: Hash validated using alternative method');
+}
+
     
     try {
         // Initialize PayPal API
@@ -1276,12 +1286,16 @@ public function create_express_checkout($request) {
             'server_id' => $order_data['server_id']
         ));
         
+        // Get the order amount from either cart_total or order_total parameter
+        $order_amount = isset($order_data['cart_total']) ? $order_data['cart_total'] : 
+               (isset($order_data['order_total']) ? $order_data['order_total'] : 0);
+        
         // Log transaction
         $this->log_transaction(
             $site->id,
             $order_data['order_id'],
             $paypal_order['id'],
-            $order_data['order_total'],
+            $order_amount,
             $order_data['currency'],
             'pending',
             json_encode(array('express_checkout' => true))

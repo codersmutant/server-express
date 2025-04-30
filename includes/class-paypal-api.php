@@ -1169,42 +1169,43 @@ public function update_paypal_order_shipping($paypal_order_id, $shipping_option_
     // Extract the reference ID from the response
     $reference_id = $current_order['purchase_units'][0]['reference_id'];
     
-    // Calculate item total (total minus shipping cost)
-    // If shipping cost isn't provided, use a reasonable default by checking the difference
-    if ($shipping_cost <= 0 && isset($current_order['purchase_units'][0]['amount']['value'])) {
-        $old_total = floatval($current_order['purchase_units'][0]['amount']['value']);
-        $new_total = floatval($amount);
-        
-        if ($new_total > $old_total) {
-            // If total increased, assume the difference is shipping
-            $shipping_cost = $new_total - $old_total;
-            $item_total = $old_total;
-        } else {
-            // Otherwise assume a reasonable split (80% item, 20% shipping)
-            $shipping_cost = $new_total * 0.2;
-            $item_total = $new_total * 0.8;
+   // Check if we have shipping options with the selected shipping method
+if (!empty($shipping_options) && !empty($shipping_method)) {
+    // Find the selected shipping option to get its exact cost
+    foreach ($shipping_options as $option) {
+        if ($option['id'] === $shipping_method) {
+            $shipping_cost = floatval($option['cost']);
+            $this->log_info('Using exact shipping cost from selected method: ' . $shipping_cost);
+            break;
         }
-    } else {
-        $item_total = floatval($amount) - floatval($shipping_cost);
+    }
+}
+ if ($shipping_cost <= 0 && !empty($shipping_options) && is_array($shipping_options)) {
+        foreach ($shipping_options as $option) {
+            if (isset($option['cost'])) {
+                $shipping_cost = floatval($option['cost']);
+                $this->log_info("Found shipping cost from options: $shipping_cost");
+                break;
+            }
+        }
     }
     
-    // Ensure item_total is never negative
-    $item_total = max(0.01, $item_total);
-    
-    $this->log_info("Updating PayPal order with: Total=$amount, Item Total=$item_total, Shipping=$shipping_cost");
-    
+    // Calculate the CORRECT total with shipping included
+    $total_with_shipping = floatval($amount) + floatval($shipping_cost);
+    $this->log_info("Updating PayPal order - Base amount: $amount, Shipping: $shipping_cost, Total: $total_with_shipping");
+   
     // Prepare the patch request to update shipping option and amounts
-    $patches = array(
+     $patches = array(
         array(
             'op' => 'replace',
             'path' => "/purchase_units/@reference_id=='$reference_id'/amount",
             'value' => array(
                 'currency_code' => $currency,
-                'value' => number_format($amount, 2, '.', ''),
+                'value' => number_format($total_with_shipping, 2, '.', ''),  // FIXED: Now includes shipping
                 'breakdown' => array(
                     'item_total' => array(
                         'currency_code' => $currency,
-                        'value' => number_format($item_total, 2, '.', '')
+                        'value' => number_format($amount, 2, '.', '')  // Keep original amount as item_total
                     ),
                     'shipping' => array(
                         'currency_code' => $currency,

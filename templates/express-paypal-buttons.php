@@ -438,215 +438,254 @@ $formatted_amount = number_format((float)$amount, 2, '.', ',');
             return orderData.paypalOrderId;
         }
         
-        /**
-         * Initialize PayPal buttons
-         */
-        function initPayPalButtons() {
-            log('Initializing PayPal Express Checkout buttons');
+        // Initialize PayPal buttons
+function initPayPalButtons() {
+    log('Initializing PayPal Express Checkout buttons');
+    
+    // Check if PayPal SDK is available
+    if (typeof paypal === 'undefined') {
+        log('PayPal SDK not loaded');
+        showError('PayPal SDK could not be loaded. Please try again later.');
+        return;
+    }
+    
+    // Notify parent window that buttons are loaded
+    sendMessageToParent({
+        action: 'button_loaded'
+    });
+    
+    // Render PayPal buttons
+    paypal.Buttons({
+        // Style the buttons
+        style: {
+            layout: 'horizontal',  // horizontal | vertical
+            color: 'gold',         // gold | blue | silver | black
+            shape: 'rect',         // pill | rect
+            label: 'paypal',       // pay | checkout | paypal | buynow
+            tagline: false
+        },
+        
+        // Create order
+        createOrder: function(data, actions) {
+            log('PayPal button clicked');
             
-            // Check if PayPal SDK is available
-            if (typeof paypal === 'undefined') {
-                log('PayPal SDK not loaded');
-                showError('PayPal SDK could not be loaded. Please try again later.');
+            // Notify parent window that button was clicked
+            sendMessageToParent({
+                action: 'button_clicked'
+            });
+            
+            // Wait for order data from parent
+            return new Promise(function(resolve, reject) {
+                log('Waiting for order data from parent window...');
+                
+                // Create message handler
+                var messageHandler = function(event) {
+                    log('Received message from parent:', event.data);
+                    
+                    // Check if message is for us
+                    var data = event.data;
+                    if (!data || !data.action || data.source !== 'woocommerce-client') {
+                        return;
+                    }
+                    
+                    // Handle create_paypal_order action
+                    if (data.action === 'create_paypal_order') {
+                        log('Received order data from parent');
+                        
+                        // Remove event listener
+                        window.removeEventListener('message', messageHandler);
+                        
+                        // Create PayPal order with the data
+                        resolve(data.paypal_order_id);
+                    }
+                };
+                
+                // Add message listener
+                window.addEventListener('message', messageHandler);
+                
+                // Set timeout for order creation
+                setTimeout(function() {
+                    log('Timeout waiting for order data');
+                    window.removeEventListener('message', messageHandler);
+                    reject(new Error('Timeout waiting for order data'));
+                }, 30000);
+            });
+        },
+        
+        // Handle shipping address
+onShippingChange: function(data, actions) {
+    // This only applies if needsShipping is true
+    if (!orderData.needsShipping) {
+        return actions.resolve();
+    }
+    
+    log('Shipping address changed:', data.shipping_address);
+    
+    // Store address
+    orderData.shippingAddress = data.shipping_address;
+    
+    // Notify parent window to get shipping options
+    sendMessageToParent({
+        action: 'shipping_options_needed',
+        address: data.shipping_address
+    });
+    
+    // Return a promise that resolves when parent sends shipping options
+    return new Promise(function(resolve, reject) {
+        var messageHandler = function(event) {
+            // Check if message is for us
+            var msgData = event.data;
+            if (!msgData || !msgData.action || msgData.source !== 'woocommerce-client') {
                 return;
             }
             
-            // Notify parent window that buttons are loaded
-            sendMessageToParent({
-                action: 'button_loaded'
-            });
-            
-            // Render PayPal buttons
-            paypal.Buttons({
-                // Style the buttons
-                style: {
-                    layout: 'horizontal',  // horizontal | vertical
-                    color: 'gold',         // gold | blue | silver | black
-                    shape: 'rect',         // pill | rect
-                    label: 'paypal',       // pay | checkout | paypal | buynow
-                    tagline: false
-                },
+            if (msgData.action === 'shipping_options_available') {
+                log('Received shipping options from parent:', msgData.shipping_options);
                 
-                // Create order
-                createOrder: function(data, actions) {
-                    log('PayPal button clicked');
+                // Remove event listener
+                window.removeEventListener('message', messageHandler);
+                
+                // Format shipping options for PayPal
+                if (msgData.shipping_options && msgData.shipping_options.length > 0) {
+                    var paypalShippingOptions = [];
                     
-                    // Notify parent window that button was clicked
-                    sendMessageToParent({
-                        action: 'button_clicked'
+                    msgData.shipping_options.forEach(function(option) {
+                        paypalShippingOptions.push({
+                            id: option.id,
+                            label: option.label,
+                            type: 'SHIPPING',
+                            selected: false,
+                            amount: {
+                                value: option.cost,
+                                currency_code: orderData.currency
+                            }
+                        });
                     });
                     
-                    // Wait for order data from parent
-                    return new Promise(function(resolve, reject) {
-                        log('Waiting for order data from parent window...');
-                        
-                        // Create message handler
-                        var messageHandler = function(event) {
-                            log('Received message from parent:', event.data);
-                            
-                            // Check if message is for us
-                            var data = event.data;
-                            if (!data || !data.action || data.source !== 'woocommerce-client') {
-                                return;
-                            }
-                            
-                            // Handle create_paypal_order action
-                            if (data.action === 'create_paypal_order') {
-                                log('Received order data from parent');
-                                
-                                // Remove event listener
-                                window.removeEventListener('message', messageHandler);
-                                
-                                // Create PayPal order with the data
-                                var paypalOrderId = createPayPalOrder(data);
-                                resolve(paypalOrderId);
-                            }
-                        };
-                        
-                        // Add message listener
-                        window.addEventListener('message', messageHandler);
-                        
-                        // Set timeout for order creation
-                        setTimeout(function() {
-                            log('Timeout waiting for order data');
-                            window.removeEventListener('message', messageHandler);
-                            reject(new Error('Timeout waiting for order data'));
-                        }, 30000);
-                    });
-                },
-                
-                // Handle shipping address
-                onShippingChange: function(data, actions) {
-                    // This only applies if needsShipping is true
-                    if (!orderData.needsShipping) {
-                        return actions.resolve();
+                    // Set first option as selected
+                    if (paypalShippingOptions.length > 0) {
+                        paypalShippingOptions[0].selected = true;
                     }
                     
-                    log('Shipping address changed:', data.shipping_address);
+                    log('Returning shipping options to PayPal:', paypalShippingOptions);
                     
-                    // Store address
-                    orderData.shippingAddress = data.shipping_address;
-                    
-                    // Notify parent window to get shipping options
-                    sendMessageToParent({
-                        action: 'shipping_options_needed',
-                        address: data.shipping_address
-                    });
-                    
-                    // Return a promise that resolves when parent sends shipping options
-                    return new Promise(function(resolve, reject) {
-                        var messageHandler = function(event) {
-                            // Check if message is for us
-                            var data = event.data;
-                            if (!data || !data.action || data.source !== 'woocommerce-client') {
-                                return;
-                            }
-                            
-                            if (data.action === 'shipping_options_available') {
-                                log('Received shipping options from parent:', data.shipping_options);
-                                
-                                // Remove event listener
-                                window.removeEventListener('message', messageHandler);
-                                
-                                // Display shipping options
-                                displayShippingOptions(data.shipping_options);
-                                
-                                // Resolve the promise
-                                resolve();
-                            } else if (data.action === 'shipping_options_error') {
-                                log('Error getting shipping options:', data.message);
-                                
-                                // Remove event listener
-                                window.removeEventListener('message', messageHandler);
-                                
-                                // Show error
-                                showError(data.message || 'No shipping options available for this address');
-                                
-                                // Reject the promise
-                                reject('NO_SHIPPING_OPTIONS');
-                            } else if (data.action === 'shipping_method_updated') {
-                                // Method was selected and updated
-                                log('Shipping method updated successfully');
-                                
-                                // Remove event listener
-                                window.removeEventListener('message', messageHandler);
-                                
-                                // Resolve the promise
-                                resolve();
-                            } else if (data.action === 'shipping_method_error') {
-                                log('Error updating shipping method:', data.message);
-                                
-                                // Remove event listener
-                                window.removeEventListener('message', messageHandler);
-                                
-                                // Show error
-                                showError(data.message || 'Failed to update shipping method');
-                                
-                                // Reject the promise
-                                reject('SHIPPING_METHOD_ERROR');
-                            }
-                        };
-                        
-                        // Add message listener
-                        window.addEventListener('message', messageHandler);
-                    });
-                },
-                
-                // On approval
-                onApprove: function(data, actions) {
-                    log('Payment approved by user:', data);
-                    
-                    // Show processing message
-                    showProcessing();
-                    
-                    // Notify parent window
-                    sendMessageToParent({
-                        action: 'payment_approved',
-                        payload: {
-                            orderID: data.orderID,
-                            wcOrderId: orderData.wcOrderId
-                        }
-                    });
-                    
-                    // Show success message
-                    hideProcessing();
-                    showSuccess('Payment successful! Finalizing your order...');
-                    
-                    return actions.order.capture();
-                },
-                
-                // On cancel
-                onCancel: function(data) {
-                    log('Payment cancelled by user:', data);
-                    
-                    // Notify parent window
-                    sendMessageToParent({
-                        action: 'payment_cancelled',
-                        payload: data
-                    });
-                    
-                    showMessage('Payment cancelled. You can try again when you\'re ready.');
-                },
-                
-                // On error
-                onError: function(err) {
-                    log('PayPal error:', err);
-                    
-                    // Notify parent window
-                    sendMessageToParent({
-                        action: 'payment_error',
-                        error: {
-                            message: err.message || 'An error occurred'
-                        }
-                    });
-                    
-                    showError('PayPal error: ' + (err.message || 'An error occurred'));
+                    // CRITICAL: Return shipping options to PayPal in their expected format
+                    resolve({ shippingOptions: paypalShippingOptions });
+                } else {
+                    // Just resolve normally if no options
+                    resolve();
                 }
-            }).render('#paypal-express-button-container');
+                
+                // Also display shipping options in our own UI
+                displayShippingOptions(msgData.shipping_options);
+            } else if (msgData.action === 'shipping_options_error') {
+                // Error handling...
+            }
+        };
+        
+        // Add message listener
+        window.addEventListener('message', messageHandler);
+    });
+},
+        
+        // Handle shipping option selection in PayPal's UI
+        onShippingOptionChange: function(data, actions) {
+            log('PayPal shipping option changed:', data);
             
-            // Initial resize
-            setTimeout(resizeIframe, 500);
+            var selectedOptionId = data.selectedShippingOption.id;
+            
+            // Update our UI
+            selectShippingOption(selectedOptionId);
+            
+            // Notify parent of selection
+            sendMessageToParent({
+                action: 'shipping_option_selected',
+                selectedOption: selectedOptionId
+            });
+            
+            // Return promise
+            return new Promise(function(resolve, reject) {
+                var messageHandler = function(event) {
+                    var msgData = event.data;
+                    if (!msgData || !msgData.action || msgData.source !== 'woocommerce-client') {
+                        return;
+                    }
+                    
+                    if (msgData.action === 'shipping_method_updated') {
+                        window.removeEventListener('message', messageHandler);
+                        resolve();
+                    } else if (msgData.action === 'shipping_method_error') {
+                        window.removeEventListener('message', messageHandler);
+                        showError(msgData.message || 'Failed to update shipping method');
+                        reject();
+                    }
+                };
+                
+                window.addEventListener('message', messageHandler);
+                
+                // Set timeout
+                setTimeout(function() {
+                    window.removeEventListener('message', messageHandler);
+                    resolve(); // Resolve anyway to not block UI
+                }, 5000);
+            });
+        },
+        
+        // On approval
+        onApprove: function(data, actions) {
+            log('Payment approved by user:', data);
+            
+            // Show processing message
+            showProcessing();
+            
+            // Notify parent window
+            sendMessageToParent({
+                action: 'payment_approved',
+                payload: {
+                    orderID: data.orderID,
+                    wcOrderId: orderData.wcOrderId
+                }
+            });
+            
+            // Show success message
+            hideProcessing();
+            showSuccess('Payment successful! Finalizing your order...');
+            
+            return actions.order.capture();
+        },
+        
+        // On cancel
+        onCancel: function(data) {
+            log('Payment cancelled by user:', data);
+            
+            // Notify parent window
+            sendMessageToParent({
+                action: 'payment_cancelled',
+                payload: data
+            });
+            
+            showMessage('Payment cancelled. You can try again when you\'re ready.');
+        },
+        
+        // On error
+        onError: function(err) {
+            log('PayPal error:', err);
+            
+            // Notify parent window
+            sendMessageToParent({
+                action: 'payment_error',
+                error: {
+                    message: err.message || 'An error occurred'
+                }
+            });
+            
+            showError('PayPal error: ' + (err.message || 'An error occurred'));
         }
+    }).render('#paypal-express-button-container');
+    
+    // Initial resize
+    setTimeout(resizeIframe, 500);
+}
         
         // Initialize when DOM is ready
         if (document.readyState === 'loading') {

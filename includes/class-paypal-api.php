@@ -1169,18 +1169,8 @@ public function update_paypal_order_shipping($paypal_order_id, $shipping_option_
     // Extract the reference ID from the response
     $reference_id = $current_order['purchase_units'][0]['reference_id'];
     
-   // Check if we have shipping options with the selected shipping method
-if (!empty($shipping_options) && !empty($shipping_method)) {
-    // Find the selected shipping option to get its exact cost
-    foreach ($shipping_options as $option) {
-        if ($option['id'] === $shipping_method) {
-            $shipping_cost = floatval($option['cost']);
-            $this->log_info('Using exact shipping cost from selected method: ' . $shipping_cost);
-            break;
-        }
-    }
-}
- if ($shipping_cost <= 0 && !empty($shipping_options) && is_array($shipping_options)) {
+    // Check if we have a valid shipping cost
+    if ($shipping_cost <= 0 && !empty($shipping_options) && is_array($shipping_options)) {
         foreach ($shipping_options as $option) {
             if (isset($option['cost'])) {
                 $shipping_cost = floatval($option['cost']);
@@ -1190,12 +1180,12 @@ if (!empty($shipping_options) && !empty($shipping_method)) {
         }
     }
     
-    // Calculate the CORRECT total with shipping included
+    // CRITICAL FIX: Calculate the CORRECT total by adding shipping to the amount
     $total_with_shipping = floatval($amount) + floatval($shipping_cost);
     $this->log_info("Updating PayPal order - Base amount: $amount, Shipping: $shipping_cost, Total: $total_with_shipping");
    
     // Prepare the patch request to update shipping option and amounts
-     $patches = array(
+    $patches = array(
         array(
             'op' => 'replace',
             'path' => "/purchase_units/@reference_id=='$reference_id'/amount",
@@ -1209,7 +1199,7 @@ if (!empty($shipping_options) && !empty($shipping_method)) {
                     ),
                     'shipping' => array(
                         'currency_code' => $currency,
-                        'value' => number_format($shipping_cost, 2, '.', '')
+                        'value' => number_format($shipping_cost, 2, '.', '')  // FIXED: Now uses actual shipping cost
                     )
                 )
             )

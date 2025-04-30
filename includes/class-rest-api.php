@@ -998,25 +998,38 @@ private function validate_request($request) {
      * Get JSON parameters from request
      */
     private function get_json_params($request) {
-        $content_type = $request->get_content_type();
-        
-        if ($content_type && 
-            (strpos($content_type['value'], 'application/json') !== false)) {
-            return $request->get_json_params();
-        }
-        
-        // Try to get from body
+    $content_type = $request->get_content_type();
+    $json_params = null;
+    
+    // First try: Check if it's JSON content type
+    if ($content_type && strpos($content_type['value'], 'application/json') !== false) {
+        $json_params = $request->get_json_params();
+        error_log('Express Checkout: Got JSON params from content type: ' . json_encode($json_params));
+    }
+    
+    // Second try: Check body for JSON
+    if (empty($json_params)) {
         $body = $request->get_body();
         if (!empty($body)) {
             $params = json_decode($body, true);
             if (json_last_error() === JSON_ERROR_NONE) {
-                return $params;
+                $json_params = $params;
+                error_log('Express Checkout: Got JSON params from body: ' . json_encode($json_params));
             }
         }
-        
-        // If all else fails, get from query parameters
-        return $request->get_params();
     }
+    
+    // Third try: Check if it's form data
+    if (empty($json_params)) {
+        $params = $request->get_params();
+        if (!empty($params)) {
+            $json_params = $params;
+            error_log('Express Checkout: Got params from request: ' . json_encode($json_params));
+        }
+    }
+    
+    return $json_params;
+}
     
     /**
      * Log an error message
@@ -1362,10 +1375,20 @@ public function update_express_shipping($request) {
         );
     }
     
-    // Decode request data
-    $request_data = json_decode(base64_decode($request_data_encoded), true);
+    // Decode request data - FIXED to properly handle the base64 encoding
+    $decoded_data = base64_decode($request_data_encoded);
+    if (!$decoded_data) {
+        error_log('Express Checkout: Failed to decode base64 data');
+        return new WP_Error(
+            'decode_error',
+            __('Failed to decode request data', 'woo-paypal-proxy-server'),
+            array('status' => 400)
+        );
+    }
+    
+    $request_data = json_decode($decoded_data, true);
     if (!$request_data) {
-        error_log('Express Checkout: Invalid request data format');
+        error_log('Express Checkout: Failed to parse JSON after base64 decode. Decoded data: ' . $decoded_data);
         return new WP_Error(
             'invalid_data',
             __('Invalid request data format', 'woo-paypal-proxy-server'),
@@ -1380,6 +1403,12 @@ public function update_express_shipping($request) {
     $paypal_order_id = isset($request_data['paypal_order_id']) ? $request_data['paypal_order_id'] : '';
     $shipping_method = isset($request_data['shipping_method']) ? $request_data['shipping_method'] : '';
     $shipping_options = isset($request_data['shipping_options']) ? $request_data['shipping_options'] : array();
+    $order_total = isset($request_data['order_total']) ? $request_data['order_total'] : 0;
+    $currency = isset($request_data['currency']) ? $request_data['currency'] : 'USD';
+    
+    // Log the important data we extracted
+    error_log('Express Checkout: Extracted shipping options: ' . json_encode($shipping_options));
+    error_log('Express Checkout: Shipping method: ' . $shipping_method);
     
     // Validate hash
     $expected_hash = hash_hmac('sha256', $timestamp . $order_id . $paypal_order_id . $api_key, $site->api_secret);
@@ -1403,16 +1432,19 @@ public function update_express_shipping($request) {
         // Initialize PayPal API
         $paypal_api = new WPPPS_PayPal_API();
         
-        // Get the order total from request data
-        $order_total = isset($request_data['order_total']) ? $request_data['order_total'] : 0;
-        $currency = isset($request_data['currency']) ? $request_data['currency'] : 'USD';
-        
-        // Check if we have a shipping method selected
+        // If no shipping method is selected, use the first available one
         $selected_shipping_cost = 0;
-        if (!empty($shipping_method) && !empty($request_data['shipping_options'])) {
-            // Find the selected shipping option
-            foreach ($request_data['shipping_options'] as $option) {
-                if ($option['id'] === $shipping_method) {
+        $selected_method = $shipping_method;
+        
+        if (empty($selected_method) && !empty($shipping_options) && is_array($shipping_options) && count($shipping_options) > 0) {
+            // Use the first shipping option as default
+            $selected_method = $shipping_options[0]['id'];
+            $selected_shipping_cost = floatval($shipping_options[0]['cost']);
+            error_log('Express Checkout: No shipping method selected, using first option: ' . $selected_method . ' with cost: ' . $selected_shipping_cost);
+        } else if (!empty($selected_method) && !empty($shipping_options)) {
+            // Find the cost for the selected method
+            foreach ($shipping_options as $option) {
+                if ($option['id'] === $selected_method) {
                     $selected_shipping_cost = floatval($option['cost']);
                     error_log('Express Checkout: Selected shipping method cost: ' . $selected_shipping_cost);
                     break;
@@ -1423,7 +1455,7 @@ public function update_express_shipping($request) {
         // Update PayPal order with shipping method and new total
         $updated_order = $paypal_api->update_paypal_order_shipping(
             $paypal_order_id,
-            $shipping_method,
+            $selected_method,
             $order_total,
             $currency,
             $selected_shipping_cost
@@ -1436,10 +1468,11 @@ public function update_express_shipping($request) {
         
         error_log('Express Checkout: Successfully updated PayPal order with shipping method');
         
-        // Return success response
+        // Return success response with shipping options
         return new WP_REST_Response(array(
             'success' => true,
-            'message' => 'Shipping updated successfully'
+            'message' => 'Shipping updated successfully',
+            'shipping_options' => $shipping_options // Return shipping options to client
         ), 200);
         
     } catch (Exception $e) {

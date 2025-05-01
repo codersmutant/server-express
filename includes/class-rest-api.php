@@ -220,6 +220,9 @@ if (!empty($params['line_items']) && is_array($params['line_items'])) {
                 // Store the actual product ID for reference
                 $params['line_items'][$key]['actual_product_id'] = $mapped_product_id;
                 
+                 $mapping_key = 'wppps_product_mapping_' . $item['product_id'] . '_' . $site->id;
+                set_transient($mapping_key, $mapped_product_id, 24 * HOUR_IN_SECONDS);
+                
                 error_log('STORE DATA - Mapped product ID ' . $item['product_id'] . ' to ' . $mapped_product_id . ': ' . $mapped_product->get_name());
             } else {
                 error_log('STORE DATA - Mapped product ID ' . $mapped_product_id . ' not found');
@@ -1927,7 +1930,7 @@ public function get_paypal_order($request) {
     ), 200);
     }
     
-    /**
+/**
  * Create a mirrored WooCommerce order from Website A
  */
 public function mirror_order($request) {
@@ -2012,14 +2015,58 @@ public function mirror_order($request) {
         $order->set_payment_method($order_data['payment_method']);
         $order->set_payment_method_title($order_data['payment_method_title']);
         
-        // Add order items
+        // Store original tax totals 
+        $original_tax_total = 0;
+        $original_shipping_tax = 0;
+        
+        // Add order items with proper mapping
         if (!empty($order_data['items'])) {
+            error_log('Processing ' . count($order_data['items']) . ' line items for mirrored order');
+            
             foreach ($order_data['items'] as $item) {
-                $product_id = isset($item['mapped_product_id']) ? $item['mapped_product_id'] : $item['product_id'];
-                $product = wc_get_product($product_id);
+                // Look for mapped product ID first
+                $mapped_id = null;
+                $original_product_id = isset($item['product_id']) ? intval($item['product_id']) : 0;
+
+                // 1. First check if this mapping was previously used with PayPal
+                $mapping_key = 'wppps_product_mapping_' . $original_product_id . '_' . $site->id;
+                $stored_mapping = get_transient($mapping_key);
+
+                if ($stored_mapping) {
+                    // Use the same mapping that was used with PayPal
+                    $mapped_id = intval($stored_mapping);
+                    error_log('Using previously stored mapping from PayPal: ' . $mapped_id . ' for product: ' . $original_product_id);
+                } 
+                // 2. Otherwise check if mapped ID was provided in the order data
+                else if (!empty($item['mapped_product_id'])) {
+                    $mapped_id = intval($item['mapped_product_id']);
+                    error_log('Found mapped product ID in order data: ' . $mapped_id . ' for product: ' . $original_product_id);
+                }
+
+                // Check if mapped product exists
+                if ($mapped_id) {
+                    $mapped_product = wc_get_product($mapped_id);
+                    if ($mapped_product) {
+                        error_log('Successfully found mapped product: ' . $mapped_product->get_name());
+                        $product_id = $mapped_id;
+                    } else {
+                        error_log('Mapped product not found: ' . $mapped_id);
+                        $product_id = null;
+                    }
+                } else {
+                    $product_id = $original_product_id;
+                    error_log('No mapped product ID found, using original: ' . $product_id);
+                }
+                
+                // Try to get the product
+                $product = null;
+                if ($product_id) {
+                    $product = wc_get_product($product_id);
+                }
                 
                 // If product doesn't exist, create a simple product
                 if (!$product) {
+                    error_log('Creating new product with name: ' . $item['name']);
                     $product = new WC_Product_Simple();
                     $product->set_name($item['name']);
                     $product->set_regular_price($item['price']);
@@ -2028,19 +2075,30 @@ public function mirror_order($request) {
                     $product_id = $product->get_id();
                 }
                 
-                // Add line item
+                // Add line item with exact price from original order
                 $item_id = $order->add_product(
                     $product,
                     $item['quantity'],
                     array(
                         'total' => $item['line_total'],
-                        'subtotal' => $item['line_subtotal'],
+                        'subtotal' => isset($item['line_subtotal']) ? $item['line_subtotal'] : $item['line_total'],
+                        'total_tax' => isset($item['tax_amount']) ? $item['tax_amount'] : 0,
                     )
                 );
+                
+                // Store mapped ID as meta for reference
+                if ($mapped_id) {
+                    wc_add_order_item_meta($item_id, '_mapped_product_id', $mapped_id);
+                }
+                
+                // Add to original tax total
+                if (isset($item['tax_amount'])) {
+                    $original_tax_total += floatval($item['tax_amount']);
+                }
             }
         }
         
-        // Add shipping items
+        // Add shipping items with exact tax amounts
         if (!empty($order_data['shipping_lines'])) {
             foreach ($order_data['shipping_lines'] as $shipping) {
                 $item = new WC_Order_Item_Shipping();
@@ -2052,10 +2110,13 @@ public function mirror_order($request) {
                     'taxes' => isset($shipping['taxes']) ? $shipping['taxes'] : array(),
                 ));
                 $order->add_item($item);
+                
+                // Add to shipping tax total
+                $original_shipping_tax += floatval($shipping['total_tax']);
             }
         }
         
-        // Add tax items
+        // Add tax items with exact amounts
         if (!empty($order_data['tax_lines'])) {
             foreach ($order_data['tax_lines'] as $tax) {
                 $item = new WC_Order_Item_Tax();
@@ -2083,6 +2144,11 @@ public function mirror_order($request) {
                     'taxes' => isset($fee['taxes']) ? $fee['taxes'] : array(),
                 ));
                 $order->add_item($item);
+                
+                // Add to original tax total if applicable
+                if (isset($fee['total_tax'])) {
+                    $original_tax_total += floatval($fee['total_tax']);
+                }
             }
         }
         
@@ -2099,8 +2165,41 @@ public function mirror_order($request) {
             }
         }
         
-        // Calculate totals
+        // Calculate totals first (this might recalculate taxes incorrectly)
         $order->calculate_totals();
+        
+        // Now manually update tax totals to match the original order
+        $original_tax_total = isset($order_data['cart_tax']) ? floatval($order_data['cart_tax']) : $original_tax_total;
+        $original_shipping_tax = isset($order_data['shipping_tax']) ? floatval($order_data['shipping_tax']) : $original_shipping_tax;
+        $total_tax = $original_tax_total + $original_shipping_tax;
+
+        error_log('TAX DEBUG - Original tax from data: ' . $original_tax_total);
+        error_log('TAX DEBUG - Original shipping tax from data: ' . $original_shipping_tax);
+        error_log('TAX DEBUG - Total tax: ' . $total_tax);
+        error_log('TAX DEBUG - Order calculated tax: ' . $order->get_total_tax());
+
+        // If the original tax total is different from what was calculated, force it
+        if (abs($total_tax - $order->get_total_tax()) > 0.01) {
+            error_log('Fixing tax total. Original: ' . $total_tax . ', Calculated: ' . $order->get_total_tax());
+            
+            // Update the order meta directly for accurate tax values
+            update_post_meta($order->get_id(), '_cart_tax', $original_tax_total);
+            update_post_meta($order->get_id(), '_shipping_tax', $original_shipping_tax);
+            update_post_meta($order->get_id(), '_order_tax', $original_tax_total);
+            update_post_meta($order->get_id(), '_order_shipping_tax', $original_shipping_tax);
+            
+            // Update the order total to include correct tax
+            $new_total = $order->get_subtotal() + $order->get_shipping_total() + $total_tax - $order->get_discount_total();
+            update_post_meta($order->get_id(), '_order_total', $new_total);
+            
+            // Add note about tax adjustment
+            $order->add_order_note(sprintf(
+                __('Tax totals manually adjusted: Item tax: %s, Shipping tax: %s, Total tax: %s', 'woo-paypal-proxy-server'),
+                wc_price($original_tax_total),
+                wc_price($original_shipping_tax),
+                wc_price($total_tax)
+            ));
+        }
         
         // Store meta data
         $order->update_meta_data('_mirrored_from_external_order', $order_data['order_id']);
@@ -2153,5 +2252,5 @@ public function mirror_order($request) {
             array('status' => 500)
         );
     }
-}
+    }
 }

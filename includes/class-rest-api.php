@@ -84,6 +84,12 @@ class WPPPS_REST_API {
         'permission_callback' => '__return_true',
     ));
     
+    register_rest_route('wppps/v1', '/mirror-order', array(
+    'methods' => 'GET',
+    'callback' => array($this, 'mirror_order'),
+    'permission_callback' => '__return_true',
+));
+    
     register_rest_route('wppps/v1', '/get-paypal-order', array(
     'methods' => 'POST',
     'callback' => array($this, 'get_paypal_order'),
@@ -1920,4 +1926,232 @@ public function get_paypal_order($request) {
         'order_details' => $order_details
     ), 200);
     }
+    
+    /**
+ * Create a mirrored WooCommerce order from Website A
+ */
+public function mirror_order($request) {
+    // Validate request
+    $validation = $this->validate_request($request);
+    if (is_wp_error($validation)) {
+        return $validation;
+    }
+    
+    // Get parameters
+    $api_key = $request->get_param('api_key');
+    $order_data_encoded = $request->get_param('order_data');
+    
+    if (empty($order_data_encoded)) {
+        return new WP_Error(
+            'missing_data',
+            __('Order data is required', 'woo-paypal-proxy-server'),
+            array('status' => 400)
+        );
+    }
+    
+    // Decode order data
+    $order_data = json_decode(base64_decode($order_data_encoded), true);
+    
+    if (empty($order_data) || !is_array($order_data)) {
+        return new WP_Error(
+            'invalid_data',
+            __('Invalid order data format', 'woo-paypal-proxy-server'),
+            array('status' => 400)
+        );
+    }
+    
+    // Get site by API key
+    $site = $this->get_site_by_api_key($api_key);
+    
+    if (!$site) {
+        return new WP_Error(
+            'invalid_api_key',
+            __('Invalid API key or site not registered', 'woo-paypal-proxy-server'),
+            array('status' => 401)
+        );
+    }
+    
+    // Check if order already exists by meta
+    global $wpdb;
+    $meta_exists = $wpdb->get_var($wpdb->prepare(
+        "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = %s AND meta_value = %s LIMIT 1",
+        '_mirrored_from_external_order',
+        $order_data['order_id']
+    ));
+    
+    if ($meta_exists) {
+        return new WP_REST_Response(array(
+            'success' => true,
+            'message' => __('Order already exists', 'woo-paypal-proxy-server'),
+            'order_id' => $meta_exists,
+        ), 200);
+    }
+    
+    try {
+        // Start transaction
+        $wpdb->query('START TRANSACTION');
+        
+        // Create a new order
+        $order = wc_create_order(array(
+            'status' => 'processing',
+            'customer_id' => 0, // Guest order
+            'customer_note' => 'Mirrored from Website A - Order #' . $order_data['order_id'],
+            'total' => $order_data['order_total'],
+        ));
+        
+        // Set addresses
+        if (!empty($order_data['billing_address'])) {
+            $order->set_address($order_data['billing_address'], 'billing');
+        }
+        
+        if (!empty($order_data['shipping_address'])) {
+            $order->set_address($order_data['shipping_address'], 'shipping');
+        }
+        
+        // Set payment method
+        $order->set_payment_method($order_data['payment_method']);
+        $order->set_payment_method_title($order_data['payment_method_title']);
+        
+        // Add order items
+        if (!empty($order_data['items'])) {
+            foreach ($order_data['items'] as $item) {
+                $product_id = isset($item['mapped_product_id']) ? $item['mapped_product_id'] : $item['product_id'];
+                $product = wc_get_product($product_id);
+                
+                // If product doesn't exist, create a simple product
+                if (!$product) {
+                    $product = new WC_Product_Simple();
+                    $product->set_name($item['name']);
+                    $product->set_regular_price($item['price']);
+                    $product->set_status('publish');
+                    $product->save();
+                    $product_id = $product->get_id();
+                }
+                
+                // Add line item
+                $item_id = $order->add_product(
+                    $product,
+                    $item['quantity'],
+                    array(
+                        'total' => $item['line_total'],
+                        'subtotal' => $item['line_subtotal'],
+                    )
+                );
+            }
+        }
+        
+        // Add shipping items
+        if (!empty($order_data['shipping_lines'])) {
+            foreach ($order_data['shipping_lines'] as $shipping) {
+                $item = new WC_Order_Item_Shipping();
+                $item->set_props(array(
+                    'method_title' => $shipping['method_title'],
+                    'method_id' => $shipping['method_id'],
+                    'total' => $shipping['total'],
+                    'total_tax' => $shipping['total_tax'],
+                    'taxes' => isset($shipping['taxes']) ? $shipping['taxes'] : array(),
+                ));
+                $order->add_item($item);
+            }
+        }
+        
+        // Add tax items
+        if (!empty($order_data['tax_lines'])) {
+            foreach ($order_data['tax_lines'] as $tax) {
+                $item = new WC_Order_Item_Tax();
+                $item->set_props(array(
+                    'rate_id' => $tax['rate_id'],
+                    'label' => $tax['label'],
+                    'compound' => $tax['compound'],
+                    'tax_total' => $tax['tax_total'],
+                    'shipping_tax_total' => $tax['shipping_tax_total'],
+                ));
+                $order->add_item($item);
+            }
+        }
+        
+        // Add fee items
+        if (!empty($order_data['fee_lines'])) {
+            foreach ($order_data['fee_lines'] as $fee) {
+                $item = new WC_Order_Item_Fee();
+                $item->set_props(array(
+                    'name' => $fee['name'],
+                    'tax_class' => $fee['tax_class'],
+                    'tax_status' => $fee['tax_status'],
+                    'total' => $fee['total'],
+                    'total_tax' => $fee['total_tax'],
+                    'taxes' => isset($fee['taxes']) ? $fee['taxes'] : array(),
+                ));
+                $order->add_item($item);
+            }
+        }
+        
+        // Add coupon items
+        if (!empty($order_data['coupon_lines'])) {
+            foreach ($order_data['coupon_lines'] as $coupon) {
+                $item = new WC_Order_Item_Coupon();
+                $item->set_props(array(
+                    'code' => $coupon['code'],
+                    'discount' => $coupon['discount'],
+                    'discount_tax' => $coupon['discount_tax'],
+                ));
+                $order->add_item($item);
+            }
+        }
+        
+        // Calculate totals
+        $order->calculate_totals();
+        
+        // Store meta data
+        $order->update_meta_data('_mirrored_from_external_order', $order_data['order_id']);
+        $order->update_meta_data('_mirrored_from_site_id', $site->id);
+        $order->update_meta_data('_paypal_order_id', $order_data['paypal_order_id']);
+        
+        if (!empty($order_data['transaction_id'])) {
+            $order->update_meta_data('_transaction_id', $order_data['transaction_id']);
+        }
+        
+        // Add order note
+        $order->add_order_note(sprintf(
+            __('This order was mirrored from Website A (Order #%s). PayPal Order ID: %s', 'woo-paypal-proxy-server'),
+            $order_data['order_id'],
+            $order_data['paypal_order_id']
+        ));
+        
+        // Save the order
+        $order->save();
+        
+        // Link to transaction log
+        $log_table = $wpdb->prefix . 'wppps_transaction_log';
+        $wpdb->update(
+            $log_table,
+            array('mirrored_order_id' => $order->get_id()),
+            array(
+                'site_id' => $site->id,
+                'order_id' => $order_data['order_id'],
+                'paypal_order_id' => $order_data['paypal_order_id']
+            )
+        );
+        
+        // Commit transaction
+        $wpdb->query('COMMIT');
+        
+        // Return success
+        return new WP_REST_Response(array(
+            'success' => true,
+            'message' => __('Order mirrored successfully', 'woo-paypal-proxy-server'),
+            'order_id' => $order->get_id(),
+        ), 200);
+        
+    } catch (Exception $e) {
+        // Rollback transaction
+        $wpdb->query('ROLLBACK');
+        
+        return new WP_Error(
+            'order_creation_error',
+            $e->getMessage(),
+            array('status' => 500)
+        );
+    }
+}
 }

@@ -146,6 +146,10 @@ function wppps_activate() {
     
     // Create a transaction log table
     $log_table = $wpdb->prefix . 'wppps_transaction_log';
+        $column_exists = $wpdb->get_results("SHOW COLUMNS FROM {$log_table} LIKE 'mirrored_order_id'");
+        if (empty($column_exists)) {
+            $wpdb->query("ALTER TABLE {$log_table} ADD COLUMN `mirrored_order_id` bigint(20) NULL DEFAULT NULL");
+        }
     
     $sql = "CREATE TABLE $log_table (
         id mediumint(9) NOT NULL AUTO_INCREMENT,

@@ -204,9 +204,8 @@ $formatted_amount = number_format((float)$amount, 2, '.', ',');
     
     <?php if (!empty($client_id)) : ?>
     <!-- PayPal SDK -->
-<script src="https://www.paypal.com/sdk/js?client-id=<?php echo esc_attr($client_id); ?>&currency=<?php echo esc_attr($currency); ?>&intent=capture&commit=true&components=buttons,funding-eligibility,hosted-fields&enable-funding=venmo,paylater,card"></script>    <?php endif; ?>
-    
-    <!-- Express Checkout script -->
+<script src="https://www.paypal.com/sdk/js?client-id=<?php echo esc_attr($client_id); ?>&currency=<?php echo esc_attr($currency); ?>&intent=capture&components=buttons&enable-funding=card,venmo,paylater"></script>
+<?php endif; ?>
     <script>
         // Debug logging
         function log(message, data) {
@@ -457,7 +456,7 @@ function initPayPalButtons() {
     paypal.Buttons({
         // Style the buttons
         style: {
-            layout: 'horizontal',  // horizontal | vertical
+            layout: 'vertical',  // horizontal | vertical
             color: 'gold',         // gold | blue | silver | black
             shape: 'rect',         // pill | rect
             label: 'paypal',       // pay | checkout | paypal | buynow

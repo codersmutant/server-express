@@ -36,7 +36,7 @@
             paypal.Buttons({
                 // Style the buttons
                 style: {
-                    layout: 'horizontal',
+                    layout: 'vertical',
                     color: 'gold',
                     shape: 'rect',
                     label: 'paypal'

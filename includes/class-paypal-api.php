@@ -1249,46 +1249,73 @@ public function update_paypal_order_shipping($paypal_order_id, $shipping_option_
         $amount = $recalculated_total;
     }
     
-    // Prepare the full purchase unit for the PATCH request
-    $purchase_unit = array(
-        'amount' => array(
-            'value' => number_format(floatval($amount), 2, '.', ''),
+    // Check if prices include tax
+    $prices_include_tax = isset($current_order['purchase_units'][0]['amount']['breakdown']['item_total']['includes_tax']) && 
+                         $current_order['purchase_units'][0]['amount']['breakdown']['item_total']['includes_tax'] === true;
+
+    // For WooCommerce tax display, we can also check directly
+    if (!isset($prices_include_tax)) {
+        $prices_include_tax = wc_prices_include_tax();
+    }
+
+    $this->log_info("PayPal order prices include tax: " . ($prices_include_tax ? 'Yes' : 'No'));
+
+    // Create the breakdown with proper tax handling
+    $breakdown = array();
+    
+    // Add item_total with tax-inclusive flag if needed
+    if ($prices_include_tax) {
+        $breakdown['item_total'] = array(
             'currency_code' => $currency,
-            'breakdown' => array(
-                'item_total' => array(
-                    'currency_code' => $currency,
-                    'value' => number_format($item_total, 2, '.', '')
-                ),
-                'shipping' => array(
-                    'currency_code' => $currency,
-                    'value' => number_format($shipping_total, 2, '.', '')
-                ),
-                'tax_total' => array(
-                    'currency_code' => $currency,
-                    'value' => number_format($tax_total, 2, '.', '')
-                )
-            )
-        ),
-        'reference_id' => $reference_id
+            'value' => number_format($item_total, 2, '.', ''),
+            'includes_tax' => true
+        );
+    } else {
+        $breakdown['item_total'] = array(
+            'currency_code' => $currency,
+            'value' => number_format($item_total, 2, '.', '')
+        );
+    }
+    
+    // Add shipping
+    $breakdown['shipping'] = array(
+        'currency_code' => $currency,
+        'value' => number_format($shipping_total, 2, '.', '')
+    );
+    
+    // Add tax_total
+    $breakdown['tax_total'] = array(
+        'currency_code' => $currency,
+        'value' => number_format($tax_total, 2, '.', '')
     );
     
     // Add discount if we have it
     if ($discount > 0) {
-        $purchase_unit['amount']['breakdown']['discount'] = array(
+        $breakdown['discount'] = array(
             'currency_code' => $currency,
             'value' => number_format($discount, 2, '.', '')
         );
     } else {
-        $purchase_unit['amount']['breakdown']['discount'] = array(
+        $breakdown['discount'] = array(
             'currency_code' => $currency,
             'value' => '0.00'
         );
     }
     
     // Add handling
-    $purchase_unit['amount']['breakdown']['handling'] = array(
+    $breakdown['handling'] = array(
         'currency_code' => $currency,
         'value' => number_format($handling, 2, '.', '')
+    );
+    
+    // Prepare the full purchase unit for the PATCH request
+    $purchase_unit = array(
+        'amount' => array(
+            'value' => number_format(floatval($amount), 2, '.', ''),
+            'currency_code' => $currency,
+            'breakdown' => $breakdown
+        ),
+        'reference_id' => $reference_id
     );
     
     // Include the items if we have them

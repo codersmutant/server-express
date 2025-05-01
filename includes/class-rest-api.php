@@ -1612,6 +1612,21 @@ public function update_express_shipping($request) {
             $order_total = $order_subtotal + $selected_shipping_cost + $tax_total - $discount_total;
             error_log("Express Checkout: Recalculated order total: $order_total");
         }
+            if ($shipping_tax > 0) {
+        // Calculate item tax (product tax without shipping tax)
+        $item_tax = max(0, $tax_total - $shipping_tax);
+        
+        // Force recalculate total tax (item tax + shipping tax)
+        $tax_total = $item_tax + $shipping_tax;
+        
+        error_log("Express Checkout: Fixed tax calculation - Item tax: $item_tax, Shipping tax: $shipping_tax, Total tax: $tax_total");
+        
+        // Recalculate order total with correct tax
+        $order_total = $order_subtotal + $selected_shipping_cost + $tax_total - $discount_total;
+        
+        error_log("Express Checkout: Recalculated order total: $order_total");
+    }
+            
         
         // Update PayPal order with shipping method and complete breakdown
         $updated_order = $paypal_api->update_paypal_order_shipping(

@@ -204,8 +204,7 @@ $formatted_amount = number_format((float)$amount, 2, '.', ',');
     
     <?php if (!empty($client_id)) : ?>
     <!-- PayPal SDK -->
-    <script src="https://www.paypal.com/sdk/js?client-id=<?php echo esc_attr($client_id); ?>&currency=<?php echo esc_attr($currency); ?>&intent=capture&commit=true<?php echo $needs_shipping ? '&components=buttons,funding-eligibility,hosted-fields' : '&components=buttons'; ?>"></script>
-    <?php endif; ?>
+<script src="https://www.paypal.com/sdk/js?client-id=<?php echo esc_attr($client_id); ?>&currency=<?php echo esc_attr($currency); ?>&intent=capture&commit=true&components=buttons,funding-eligibility,hosted-fields&enable-funding=venmo,paylater,card"></script>    <?php endif; ?>
     
     <!-- Express Checkout script -->
     <script>

@@ -462,7 +462,11 @@ private function get_test_data($site_id, $order_id) {
             // Log the mismatch
             $this->log_warning('Site URL mismatch in order registration: ' . $order_data['site_url'] . ' vs ' . $site->site_url);
         }
-        
+        // Remove site_url from data sent to PayPal
+        if (isset($order_data['site_url'])) {
+            unset($order_data['site_url']);
+        }
+                
         // Store order data in session for later use
         $this->store_order_data($site->id, $order_data);
         
@@ -1267,6 +1271,29 @@ public function create_express_checkout($request) {
         );
     }
     
+    // Process line items for product mapping
+if (!empty($order_data['line_items']) && is_array($order_data['line_items'])) {
+    foreach ($order_data['line_items'] as $key => $item) {
+        // If this item has a mapped product ID, look up the product details
+        if (!empty($item['mapped_product_id'])) {
+            $mapped_product_id = intval($item['mapped_product_id']);
+            $mapped_product = wc_get_product($mapped_product_id);
+            
+            if ($mapped_product) {
+                // Replace product details but keep pricing from Website A
+                $order_data['line_items'][$key]['name'] = $mapped_product->get_name();
+                $order_data['line_items'][$key]['sku'] = $mapped_product->get_sku();
+                $order_data['line_items'][$key]['description'] = $mapped_product->get_short_description() ? 
+                    substr(wp_strip_all_tags($mapped_product->get_short_description()), 0, 127) : '';
+                
+                // Log the mapping
+                error_log('Express Checkout: Replaced product details for ID ' . $item['product_id'] . 
+                          ' with mapped product ' . $mapped_product_id . ': ' . $mapped_product->get_name());
+            }
+        }
+    }
+}
+    
     error_log('Express Checkout: Processing order data: ' . json_encode($order_data));
     
     // Validate hash with either parameter
@@ -1292,8 +1319,10 @@ public function create_express_checkout($request) {
         
         // Prepare order data for PayPal
         $reference_id = 'WC_ORDER_' . $order_data['order_id'];
-        $return_url = isset($order_data['return_url']) ? $order_data['return_url'] : '';
-        $cancel_url = isset($order_data['cancel_url']) ? $order_data['cancel_url'] : '';
+        //$return_url = isset($order_data['return_url']) ? $order_data['return_url'] : '';
+        //$cancel_url = isset($order_data['cancel_url']) ? $order_data['cancel_url'] : '';
+        $return_url = home_url('/checkout/order-received/'); // Server's thank you page
+        $cancel_url = home_url('/cart/'); //
         
         // Get the order amount
         $order_amount = isset($order_data['order_total']) ? floatval($order_data['order_total']) : 0;
@@ -2296,7 +2325,7 @@ public function mirror_order($request) {
         
         // Add order note
         $order->add_order_note(sprintf(
-            __('This order was mirrored from Website A (Order #%s). PayPal Order ID: %s', 'woo-paypal-proxy-server'),
+            __('Order Completed (Order #%s). PayPal Order ID: %s', 'woo-paypal-proxy-server'),
             $order_data['order_id'],
             $order_data['paypal_order_id']
         ));

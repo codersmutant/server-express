@@ -1180,6 +1180,50 @@ public function get_express_paypal_buttons($request) {
     exit;
 }
 
+    /**
+ * Map product IDs for Express Checkout
+ */
+private function map_product_ids_for_express($line_items, $site_id) {
+    if (empty($line_items) || !$site_id) {
+        return $line_items;
+    }
+    
+    global $wpdb;
+    $table_name = $wpdb->prefix . 'wppps_sites';
+    $site = $this->get_site_by_api_key($site_id);
+    
+    if (!$site) {
+        return $line_items;
+    }
+    
+    // Get products for mapping
+    $transient_key_pattern = 'wppps_product_mapping_*_' . $site->id;
+    
+    // Load all available mappings
+    foreach ($line_items as $index => &$item) {
+        $product_id = isset($item['product_id']) ? $item['product_id'] : 0;
+        if ($product_id) {
+            // Check if we have a mapping for this product
+            $mapping_key = 'wppps_product_mapping_' . $product_id . '_' . $site->id;
+            $mapped_id = get_transient($mapping_key);
+            
+            if ($mapped_id) {
+                $mapped_product = wc_get_product($mapped_id);
+                if ($mapped_product) {
+                    // Replace with mapped product details
+                    $item['mapped_product_id'] = $mapped_id;
+                    $item['name'] = $mapped_product->get_name();
+                    $item['sku'] = $mapped_product->get_sku();
+                    $item['description'] = wp_trim_words($mapped_product->get_short_description(), 15);
+                    error_log('Express: Mapped product ' . $product_id . ' to ' . $mapped_id);
+                }
+            }
+        }
+    }
+    
+    return $line_items;
+    }
+
 /**
  * Create Express Checkout order in PayPal
  */
@@ -1263,6 +1307,7 @@ public function create_express_checkout($request) {
         // Add line items if available
         if (!empty($order_data['line_items'])) {
             $custom_data['line_items'] = $order_data['line_items'];
+            
             error_log('Express Checkout: Using ' . count($order_data['line_items']) . ' line items');
         }
         
@@ -2088,7 +2133,7 @@ public function mirror_order($request) {
                 
                 // Store mapped ID as meta for reference
                 if ($mapped_id) {
-                    wc_add_order_item_meta($item_id, '_mapped_product_id', $mapped_id);
+                    wc_add_order_item_meta($item_id, '_mapped_product_id', $mapped_id, true);
                 }
                 
                 // Add to original tax total
@@ -2098,13 +2143,16 @@ public function mirror_order($request) {
             }
         }
         
-        // Add shipping items with exact tax amounts
-        if (!empty($order_data['shipping_lines'])) {
-            foreach ($order_data['shipping_lines'] as $shipping) {
+        // Add shipping item - only use the last one to avoid duplicates
+            if (!empty($order_data['shipping_lines'])) {
+                // Take only the last shipping method (most recent/valid one)
+                $shipping = end($order_data['shipping_lines']);
+                
                 $item = new WC_Order_Item_Shipping();
                 $item->set_props(array(
                     'method_title' => $shipping['method_title'],
                     'method_id' => $shipping['method_id'],
+                    'instance_id' => $shipping['instance_id'],
                     'total' => $shipping['total'],
                     'total_tax' => $shipping['total_tax'],
                     'taxes' => isset($shipping['taxes']) ? $shipping['taxes'] : array(),
@@ -2114,7 +2162,6 @@ public function mirror_order($request) {
                 // Add to shipping tax total
                 $original_shipping_tax += floatval($shipping['total_tax']);
             }
-        }
         
         // Add tax items with exact amounts
         if (!empty($order_data['tax_lines'])) {
@@ -2178,29 +2225,66 @@ public function mirror_order($request) {
         error_log('TAX DEBUG - Total tax: ' . $total_tax);
         error_log('TAX DEBUG - Order calculated tax: ' . $order->get_total_tax());
 
-        // If the original tax total is different from what was calculated, force it
-        if (abs($total_tax - $order->get_total_tax()) > 0.01) {
-            error_log('Fixing tax total. Original: ' . $total_tax . ', Calculated: ' . $order->get_total_tax());
-            
-            // Update the order meta directly for accurate tax values
-            update_post_meta($order->get_id(), '_cart_tax', $original_tax_total);
-            update_post_meta($order->get_id(), '_shipping_tax', $original_shipping_tax);
-            update_post_meta($order->get_id(), '_order_tax', $original_tax_total);
-            update_post_meta($order->get_id(), '_order_shipping_tax', $original_shipping_tax);
-            
-            // Update the order total to include correct tax
-            $new_total = $order->get_subtotal() + $order->get_shipping_total() + $total_tax - $order->get_discount_total();
-            update_post_meta($order->get_id(), '_order_total', $new_total);
-            
-            // Add note about tax adjustment
-            $order->add_order_note(sprintf(
-                __('Tax totals manually adjusted: Item tax: %s, Shipping tax: %s, Total tax: %s', 'woo-paypal-proxy-server'),
-                wc_price($original_tax_total),
-                wc_price($original_shipping_tax),
-                wc_price($total_tax)
+       if (abs($total_tax - $order->get_total_tax()) > 0.01) {
+    error_log('Fixing tax total. Original: ' . $total_tax . ', Calculated: ' . $order->get_total_tax());
+    
+    // Add a general tax item if we don't already have tax line items
+    if (empty($order_data['tax_lines']) && $total_tax > 0) {
+        // Create a tax item for the cart tax
+        if ($original_tax_total > 0) {
+            $item = new WC_Order_Item_Tax();
+            $item->set_props(array(
+                'rate_id'          => 0,
+                'label'            => 'Tax',
+                'compound'         => false,
+                'tax_total'        => $original_tax_total,
+                'shipping_tax_total' => 0,
             ));
+            $order->add_item($item);
         }
         
+        // Create a tax item for the shipping tax
+        if ($original_shipping_tax > 0) {
+            $item = new WC_Order_Item_Tax();
+            $item->set_props(array(
+                'rate_id'          => 0,
+                'label'            => 'Shipping Tax',
+                'compound'         => false,
+                'tax_total'        => 0,
+                'shipping_tax_total' => $original_shipping_tax,
+            ));
+            $order->add_item($item);
+        }
+    }
+    
+    // Calculate new total including tax
+    $new_total = $order->get_subtotal() + $order->get_shipping_total() + $total_tax - $order->get_discount_total();
+    
+    // Update both the meta and WC API methods
+    update_post_meta($order->get_id(), '_cart_tax', $original_tax_total);
+    update_post_meta($order->get_id(), '_shipping_tax', $original_shipping_tax);
+    update_post_meta($order->get_id(), '_order_tax', $original_tax_total);
+    update_post_meta($order->get_id(), '_order_shipping_tax', $original_shipping_tax);
+    update_post_meta($order->get_id(), '_order_total', $new_total);
+    
+    // Update tax totals using the WC API methods
+    $order->set_cart_tax($original_tax_total);
+    $order->set_shipping_tax($original_shipping_tax);
+    
+    // Set order total directly and prevent recalculation
+    $order->set_total($new_total);
+    
+    // Prevent recalculation by setting a flag
+    $order->update_meta_data('_wppps_tax_adjusted', 'yes');
+    
+    // Add note about tax adjustment
+    $order->add_order_note(sprintf(
+        __('Tax totals manually adjusted: Item tax: %s, Shipping tax: %s, Total tax: %s', 'woo-paypal-proxy-server'),
+        wc_price($original_tax_total),
+        wc_price($original_shipping_tax),
+        wc_price($total_tax)
+    ));
+}
         // Store meta data
         $order->update_meta_data('_mirrored_from_external_order', $order_data['order_id']);
         $order->update_meta_data('_mirrored_from_site_id', $site->id);
@@ -2253,4 +2337,7 @@ public function mirror_order($request) {
         );
     }
     }
+    
+    
+
 }

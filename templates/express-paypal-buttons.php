@@ -510,26 +510,39 @@ function initPayPalButtons() {
             });
         },
         
-        // Handle shipping address
+// Handle shipping address and option changes
 onShippingChange: function(data, actions) {
-
-     console.log("SHIPPING CHANGE EVENT - shipping selected:", data.selected_shipping_option);
+    console.log("SHIPPING CHANGE EVENT - Full data:", data);
+    console.log("Selected shipping option:", data.selected_shipping_option);
      
     // This only applies if needsShipping is true
     if (!orderData.needsShipping) {
         return actions.resolve();
     }
     
-    log('Shipping address changed:', data.shipping_address);
+    log('Shipping data changed. Address:', data.shipping_address);
     
     // Store address
     orderData.shippingAddress = data.shipping_address;
     
-    // Notify parent window to get shipping options
-    sendMessageToParent({
+    // Also store selected shipping option if available
+    if (data.selected_shipping_option && data.selected_shipping_option.id) {
+        orderData.selectedShippingOption = data.selected_shipping_option.id;
+        log('Selected shipping option detected:', data.selected_shipping_option.id);
+    }
+    
+    // Notify parent window to get shipping options, also sending selected option if available
+    var messageData = {
         action: 'shipping_options_needed',
         address: data.shipping_address
-    });
+    };
+    
+    // Add selected shipping method if available
+    if (data.selected_shipping_option && data.selected_shipping_option.id) {
+        messageData.selectedShippingMethod = data.selected_shipping_option.id;
+    }
+    
+    sendMessageToParent(messageData);
     
     // Return a promise that resolves when parent sends shipping options
     return new Promise(function(resolve, reject) {
@@ -551,27 +564,32 @@ onShippingChange: function(data, actions) {
                     var paypalShippingOptions = [];
                     
                     msgData.shipping_options.forEach(function(option) {
-                        paypalShippingOptions.push({
+                        // Create PayPal format option
+                        var paypalOption = {
                             id: option.id,
                             label: option.label,
                             type: 'SHIPPING',
-                            selected: false,
+                            selected: option.id === orderData.selectedShippingOption, // Mark selected if it matches stored selection
                             amount: {
                                 value: option.cost,
                                 currency_code: orderData.currency
                             }
-                        });
+                        };
+                        
+                        paypalShippingOptions.push(paypalOption);
                     });
                     
-                    // Set first option as selected
-                    if (paypalShippingOptions.length > 0) {
-                        paypalShippingOptions[0].selected = true;
+                    // If we have updated breakdown data, use it
+                    if (msgData.breakdown) {
+                        log('Using updated price breakdown:', msgData.breakdown);
+                        resolve({ 
+                            shippingOptions: paypalShippingOptions,
+                            breakdown: msgData.breakdown
+                        });
+                    } else {
+                        log('Returning shipping options without breakdown:', paypalShippingOptions);
+                        resolve({ shippingOptions: paypalShippingOptions });
                     }
-                    
-                    log('Returning shipping options to PayPal:', paypalShippingOptions);
-                    
-                    // CRITICAL: Return shipping options to PayPal in their expected format
-                    resolve({ shippingOptions: paypalShippingOptions });
                 } else {
                     // Just resolve normally if no options
                     resolve();
@@ -579,8 +597,18 @@ onShippingChange: function(data, actions) {
                 
                 // Also display shipping options in our own UI
                 displayShippingOptions(msgData.shipping_options);
+                
+                // If we have a selected option, highlight it in our UI
+                if (orderData.selectedShippingOption) {
+                    selectShippingOption(orderData.selectedShippingOption);
+                }
             } else if (msgData.action === 'shipping_options_error') {
-                // Error handling...
+                // Remove event listener
+                window.removeEventListener('message', messageHandler);
+                
+                // Show error
+                showError(msgData.message || 'No shipping options available for this address');
+                reject(new Error(msgData.message || 'No shipping options available'));
             }
         };
         

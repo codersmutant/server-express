@@ -204,7 +204,7 @@ $formatted_amount = number_format((float)$amount, 2, '.', ',');
     
     <?php if (!empty($client_id)) : ?>
     <!-- PayPal SDK -->
-<script src="https://www.paypal.com/sdk/js?client-id=<?php echo esc_attr($client_id); ?>&currency=<?php echo esc_attr($currency); ?>&intent=capture&components=buttons&enable-funding=card,venmo,paylater"></script>
+<script src="https://www.paypal.com/sdk/js?client-id=<?php echo esc_attr($client_id); ?>&currency=<?php echo esc_attr($currency); ?>&intent=capture&components=buttons&enable-funding=paylater"></script>
 <?php endif; ?>
     <script>
         // Debug logging
@@ -456,7 +456,7 @@ function initPayPalButtons() {
     paypal.Buttons({
         // Style the buttons
         style: {
-            layout: 'vertical',  // horizontal | vertical
+            layout: 'horizontal',  // horizontal | vertical
             color: 'gold',         // gold | blue | silver | black
             shape: 'rect',         // pill | rect
             label: 'paypal',       // pay | checkout | paypal | buynow

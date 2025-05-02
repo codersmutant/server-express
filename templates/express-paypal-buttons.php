@@ -512,6 +512,9 @@ function initPayPalButtons() {
         
         // Handle shipping address
 onShippingChange: function(data, actions) {
+
+     console.log("SHIPPING CHANGE EVENT - shipping selected:", data.selected_shipping_option);
+     
     // This only applies if needsShipping is true
     if (!orderData.needsShipping) {
         return actions.resolve();

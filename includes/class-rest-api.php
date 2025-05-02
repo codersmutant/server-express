@@ -1445,6 +1445,9 @@ if (!empty($order_data['line_items']) && is_array($order_data['line_items'])) {
 /**
  * Update Express Checkout shipping methods with proper tax handling
  */
+/**
+ * Update Express Checkout shipping methods with simplified tax handling
+ */
 public function update_express_shipping($request) {
     error_log('Express Checkout: Received update shipping request');
     
@@ -1514,17 +1517,16 @@ public function update_express_shipping($request) {
     $paypal_order_id = isset($request_data['paypal_order_id']) ? $request_data['paypal_order_id'] : '';
     $shipping_method = isset($request_data['shipping_method']) ? $request_data['shipping_method'] : '';
     $shipping_options = isset($request_data['shipping_options']) ? $request_data['shipping_options'] : array();
-    $shipping_total = isset($request_data['shipping_total']) ? floatval($request_data['shipping_total']) : 0;
     $order_subtotal = isset($request_data['order_subtotal']) ? floatval($request_data['order_subtotal']) : 0;
     $tax_total = isset($request_data['tax_total']) ? floatval($request_data['tax_total']) : 0;
+    $shipping_total = isset($request_data['shipping_total']) ? floatval($request_data['shipping_total']) : 0;
     $shipping_tax = isset($request_data['shipping_tax']) ? floatval($request_data['shipping_tax']) : 0;
     $discount_total = isset($request_data['discount_total']) ? floatval($request_data['discount_total']) : 0;
     $order_total = isset($request_data['order_total']) ? floatval($request_data['order_total']) : 0;
     $currency = isset($request_data['currency']) ? $request_data['currency'] : 'USD';
-    $line_items = isset($request_data['line_items']) ? $request_data['line_items'] : array();
     
-    // Log the important data we extracted
-    error_log('Express Checkout: Extracted shipping options: ' . json_encode($shipping_options));
+    // Log the key data we received
+    error_log('Express Checkout: Received shipping options: ' . json_encode($shipping_options));
     error_log('Express Checkout: Shipping method: ' . $shipping_method);
     error_log('Express Checkout: Order totals - Subtotal: ' . $order_subtotal . 
              ', Tax: ' . $tax_total . 
@@ -1555,88 +1557,75 @@ public function update_express_shipping($request) {
         // Initialize PayPal API
         $paypal_api = new WPPPS_PayPal_API();
         
-        // Variable to hold the selected shipping cost and tax
-        $selected_shipping_cost = $shipping_total; // Start with the cost from request data
-        $selected_shipping_tax = $shipping_tax; // Start with the tax from request data
-        
-        // If we have a shipping method, find its cost in shipping options
-        if (!empty($shipping_method) && !empty($shipping_options)) {
-            foreach ($shipping_options as $option) {
-                if ($option['id'] === $shipping_method) {
-                    $option_cost = floatval($option['cost']);
-                    $option_tax = isset($option['tax']) ? floatval($option['tax']) : 0;
-                    
-                    // If there's a mismatch between the option cost and shipping_total
-                    if (abs($option_cost - $shipping_total) > 0.01) {
-                        error_log("Express Checkout: WARNING - Shipping cost mismatch. Option cost: $option_cost, Shipping total: $shipping_total. Using option cost.");
-                        $selected_shipping_cost = $option_cost;
-                    }
-                    
-                    // If there's a mismatch between the option tax and shipping_tax
-                    if ($option_tax > 0 && abs($option_tax - $shipping_tax) > 0.01) {
-                        error_log("Express Checkout: WARNING - Shipping tax mismatch. Option tax: $option_tax, Shipping tax: $shipping_tax. Using option tax.");
-                        $selected_shipping_tax = $option_tax;
-                    }
-                    
-                    error_log("Express Checkout: Using shipping method {$option['id']} with cost $selected_shipping_cost and tax $selected_shipping_tax");
-                    break;
-                }
-            }
-        }
-        // If no shipping method specified but we have options, use the first one
-        else if (empty($shipping_method) && !empty($shipping_options)) {
-            $shipping_method = $shipping_options[0]['id'];
-            $selected_shipping_cost = floatval($shipping_options[0]['cost']);
-            $selected_shipping_tax = isset($shipping_options[0]['tax']) ? floatval($shipping_options[0]['tax']) : 0;
-            
-            error_log("Express Checkout: No shipping method selected, using first option {$shipping_options[0]['id']} with cost $selected_shipping_cost and tax $selected_shipping_tax");
-        }
-        
-        // CRITICAL: Ensure the tax_total includes shipping tax if it's not already
-        // Calculate the item tax (total tax minus shipping tax)
-        $item_tax = $tax_total - $selected_shipping_tax;
-        if ($item_tax < 0) {
-            // This shouldn't happen, but if it does, adjust
-            error_log("Express Checkout: WARNING - Calculated negative item tax. Total tax: $tax_total, Shipping tax: $selected_shipping_tax. Adjusting.");
-            $item_tax = 0;
-            $tax_total = $selected_shipping_tax;
-        }
-        
-        // If tax_total doesn't include shipping_tax, add it
-        if (abs($tax_total - ($item_tax + $selected_shipping_tax)) > 0.01) {
-            error_log("Express Checkout: Adjusting tax total to include shipping tax. Before: $tax_total");
-            $tax_total = $item_tax + $selected_shipping_tax;
-            error_log("Express Checkout: After: $tax_total");
-            
-            // Recalculate order total
-            $order_total = $order_subtotal + $selected_shipping_cost + $tax_total - $discount_total;
-            error_log("Express Checkout: Recalculated order total: $order_total");
-        }
-            if ($shipping_tax > 0) {
-        // Calculate item tax (product tax without shipping tax)
-        $item_tax = max(0, $tax_total - $shipping_tax);
-        
-        // Force recalculate total tax (item tax + shipping tax)
-        $tax_total = $item_tax + $shipping_tax;
-        
-        error_log("Express Checkout: Fixed tax calculation - Item tax: $item_tax, Shipping tax: $shipping_tax, Total tax: $tax_total");
-        
-        // Recalculate order total with correct tax
-        $order_total = $order_subtotal + $selected_shipping_cost + $tax_total - $discount_total;
-        
-        error_log("Express Checkout: Recalculated order total: $order_total");
+        $selected_shipping_cost = $shipping_total;
+$selected_option = null;
+
+if (!empty($shipping_options)) {
+    // If no shipping method specified but we have options, select the first one
+    if (empty($shipping_method) && !empty($shipping_options[0]['id'])) {
+        $shipping_method = $shipping_options[0]['id'];
+        error_log("Express Checkout: No shipping method specified, defaulting to first option: " . $shipping_method);
     }
+    
+    // Find the selected option
+    foreach ($shipping_options as $key => $option) {
+        if ($option['id'] === $shipping_method) {
+            $selected_option = $option;
+            $selected_shipping_cost = floatval($option['cost']);
             
+            // Mark this option as selected in the shipping_options array
+            $shipping_options[$key]['selected'] = true;
+            
+            error_log("Express Checkout: Using shipping method {$option['id']} with cost $selected_shipping_cost");
+            break;
+        }
+    }
+    
+    // If still no selected option, force select the first one
+    if (!$selected_option && !empty($shipping_options)) {
+        $selected_option = $shipping_options[0];
+        $shipping_method = $selected_option['id']; 
+        $selected_shipping_cost = floatval($selected_option['cost']);
+        $shipping_options[0]['selected'] = true;
         
-        // Update PayPal order with shipping method and complete breakdown
-        $updated_order = $paypal_api->update_paypal_order_shipping(
-            $paypal_order_id,
-            $shipping_method,
-            $order_total, // Use potentially adjusted order total
-            $currency,
-            $selected_shipping_cost, // Use the consistent shipping cost
-            $shipping_options
+        error_log("Express Checkout: No matching shipping method found, using first option: " . $shipping_method);
+    }
+}
+        
+        // Create a price breakdown based on provided totals
+        $breakdown = array(
+            'item_total' => array(
+                'currency_code' => $currency,
+                'value' => number_format($order_subtotal, 2, '.', '')
+            ),
+            'shipping' => array(
+                'currency_code' => $currency,
+                'value' => number_format($shipping_total, 2, '.', '')
+            ),
+            'tax_total' => array(
+                'currency_code' => $currency,
+                'value' => number_format($tax_total, 2, '.', '')
+            )
         );
+        
+        // Add discount if we have it
+        if ($discount_total > 0) {
+            $breakdown['discount'] = array(
+                'currency_code' => $currency,
+                'value' => number_format($discount_total, 2, '.', '')
+            );
+        }
+        
+        // Update the PayPal order with the shipping method and breakdown
+        $updated_order = $paypal_api->update_paypal_order_shipping(
+    $paypal_order_id,
+    $shipping_method,
+    $order_total,
+    $currency,
+    $shipping_total,
+    $shipping_options,
+    $tax_total  // Pass the tax value to the API function
+);
         
         if (is_wp_error($updated_order)) {
             error_log('Express Checkout: Error updating PayPal order: ' . $updated_order->get_error_message());
@@ -1645,11 +1634,12 @@ public function update_express_shipping($request) {
         
         error_log('Express Checkout: Successfully updated PayPal order with shipping method');
         
-        // Return success response with shipping options
+        // Return success response with shipping options and price breakdown
         return new WP_REST_Response(array(
             'success' => true,
             'message' => 'Shipping updated successfully',
-            'shipping_options' => $shipping_options // Return shipping options to client
+            'shipping_options' => $shipping_options,
+            'breakdown' => $breakdown
         ), 200);
         
     } catch (Exception $e) {

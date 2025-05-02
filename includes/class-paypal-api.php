@@ -1120,7 +1120,16 @@ public function create_order($amount, $currency = 'USD', $reference_id = '', $re
 /**
  * Update PayPal order with shipping information with proper tax handling
  */
-public function update_paypal_order_shipping($paypal_order_id, $shipping_option_id, $amount, $currency = 'USD', $shipping_cost = 0, $shipping_options = array()) {
+/**
+ * Update PayPal order with shipping information with simplified tax handling
+ */
+/**
+ * Update PayPal order with shipping information with proper option selection
+ */
+/**
+ * Update PayPal order with shipping information - respecting client values
+ */
+public function update_paypal_order_shipping($paypal_order_id, $shipping_option_id, $amount, $currency = 'USD', $shipping_cost = 0, $shipping_options = array(), $tax_total = 0) {
     // Get access token
     $access_token = $this->get_access_token();
     
@@ -1149,169 +1158,105 @@ public function update_paypal_order_shipping($paypal_order_id, $shipping_option_
     $items = isset($current_order['purchase_units'][0]['items']) ? 
         $current_order['purchase_units'][0]['items'] : array();
     
-    // Calculate the base amount (items only)
-    $item_total = isset($current_order['purchase_units'][0]['amount']['breakdown']['item_total']['value']) ? 
-        floatval($current_order['purchase_units'][0]['amount']['breakdown']['item_total']['value']) : $amount - $shipping_cost;
-    
-    // Calculate tax amount - initially include only product tax
-    $tax_total = isset($current_order['purchase_units'][0]['amount']['breakdown']['tax_total']['value']) ? 
-        floatval($current_order['purchase_units'][0]['amount']['breakdown']['tax_total']['value']) : 0;
-    
-    // Get discount if available
-    $discount = isset($current_order['purchase_units'][0]['amount']['breakdown']['discount']['value']) ? 
-        floatval($current_order['purchase_units'][0]['amount']['breakdown']['discount']['value']) : 0;
-    
-    // Get handling if available
-    $handling = isset($current_order['purchase_units'][0]['amount']['breakdown']['handling']['value']) ? 
-        floatval($current_order['purchase_units'][0]['amount']['breakdown']['handling']['value']) : 0;
-    
-    // Format shipping options for PayPal if provided
+    // Format shipping options for PayPal
     $paypal_shipping_options = array();
-    $selected_shipping_cost = 0;
-    $shipping_tax = 0; // Initialize shipping tax
+    $has_selected_option = false;
+    $selected_shipping_cost = floatval($shipping_cost); // Use the provided shipping cost
     
     if (!empty($shipping_options)) {
-        // Find if we have the selected shipping option in our array
-        $selected_option = null;
+        // If no specific shipping option is selected, default to the first one
+        if (empty($shipping_option_id) && !empty($shipping_options[0]['id'])) {
+            $shipping_option_id = $shipping_options[0]['id'];
+            $this->log_info("No shipping option selected, defaulting to the first option: " . $shipping_option_id);
+        }
         
         foreach ($shipping_options as $option) {
-            // Convert option cost to float to ensure accurate comparison
-            $option_cost = floatval($option['cost']);
+            // Check if this is the selected option
+            $is_selected = ($option['id'] === $shipping_option_id);
             
-            // Create the PayPal format option
+            if ($is_selected) {
+                $has_selected_option = true;
+                $this->log_info("Marking shipping option as selected: " . $option['id'] . " with cost: " . $option['cost']);
+            }
+            
+            // Create PayPal format option
             $paypal_option = array(
                 'id' => $option['id'],
                 'label' => $option['label'],
                 'type' => 'SHIPPING',
-                'selected' => ($option['id'] === $shipping_option_id),
+                'selected' => $is_selected,
                 'amount' => array(
-                    'value' => number_format($option_cost, 2, '.', ''),
+                    'value' => number_format(floatval($option['cost']), 2, '.', ''),
                     'currency_code' => $currency
                 )
             );
             
             $paypal_shipping_options[] = $paypal_option;
-            
-            // If this is the selected option, store its cost and tax
-            if ($option['id'] === $shipping_option_id) {
-                $selected_option = $option;
-                $selected_shipping_cost = $option_cost;
-                
-                // CRITICAL: Extract shipping tax if available
-                if (isset($option['tax'])) {
-                    $shipping_tax = floatval($option['tax']);
-                    $this->log_info("Found shipping tax: {$shipping_tax} for option {$option['label']}");
-                }
-                
-                $this->log_info("Found selected shipping option: {$option['label']} with cost {$option_cost}");
-            }
         }
         
-        // If we didn't find the selected option in our array but have a shipping_option_id
-        if (!$selected_option && !empty($shipping_option_id) && !empty($shipping_cost)) {
-            $selected_shipping_cost = floatval($shipping_cost);
-            $this->log_info("Using provided shipping cost: {$selected_shipping_cost}");
-        }
-        // If we still don't have a selected option but have options, select the first one
-        else if (!$selected_option && !empty($paypal_shipping_options)) {
+        // If no option was selected, force-select the first one
+        if (!$has_selected_option && !empty($paypal_shipping_options)) {
             $paypal_shipping_options[0]['selected'] = true;
-            $selected_shipping_cost = floatval($shipping_options[0]['cost']);
-            
-            // Extract shipping tax from the first option if available
-            if (isset($shipping_options[0]['tax'])) {
-                $shipping_tax = floatval($shipping_options[0]['tax']);
-                $this->log_info("Using shipping tax from first option: {$shipping_tax}");
-            }
-            
-            $this->log_info("No selected option provided, using first option with cost: {$selected_shipping_cost}");
+            $this->log_info("No option was selected, forcing selection of first option: " . $paypal_shipping_options[0]['id']);
         }
     }
     
-    // CRITICAL: Add shipping tax to the total tax amount
-    if ($shipping_tax > 0) {
-        $this->log_info("Adding shipping tax {$shipping_tax} to product tax {$tax_total}");
-        $tax_total += $shipping_tax;
-        $this->log_info("New total tax amount: {$tax_total}");
-    }
+    // Calculate price components from the provided amount
+    // We'll use the existing breakdown from the order as a guide
+    $existing_breakdown = isset($current_order['purchase_units'][0]['amount']['breakdown']) ? 
+        $current_order['purchase_units'][0]['amount']['breakdown'] : array();
     
-    // CRITICAL: Use the actual selected shipping cost, not the passed-in shipping_cost parameter
-    $shipping_total = $selected_shipping_cost;
-    $this->log_info("Using shipping cost for breakdown: {$shipping_total}");
+    // Get existing values or start with defaults
+    $item_total = isset($existing_breakdown['item_total']['value']) ? 
+        floatval($existing_breakdown['item_total']['value']) : 0;
     
-    // Recalculate the total with the correct shipping cost and tax
-    $recalculated_total = $item_total + $shipping_total + $tax_total - $discount + $handling;
-    $this->log_info("Recalculated total: {$recalculated_total} (item_total:{$item_total} + shipping:{$shipping_total} + tax:{$tax_total} - discount:{$discount} + handling:{$handling})");
+    $discount = isset($existing_breakdown['discount']['value']) ? 
+        floatval($existing_breakdown['discount']['value']) : 0;
     
-    // If the recalculated total doesn't match the input amount, log a warning
-    if (abs($recalculated_total - floatval($amount)) > 0.01) {
-        $this->log_info("Warning: Recalculated total ($recalculated_total) doesn't match input amount ($amount). Using recalculated total.");
-        // Use the recalculated amount instead of the input amount
-        $amount = $recalculated_total;
-    }
+    $handling = isset($existing_breakdown['handling']['value']) ? 
+        floatval($existing_breakdown['handling']['value']) : 0;
     
-    // Check if prices include tax
-    $prices_include_tax = isset($current_order['purchase_units'][0]['amount']['breakdown']['item_total']['includes_tax']) && 
-                         $current_order['purchase_units'][0]['amount']['breakdown']['item_total']['includes_tax'] === true;
-
-    // For WooCommerce tax display, we can also check directly
-    if (!isset($prices_include_tax)) {
-        $prices_include_tax = wc_prices_include_tax();
-    }
-
-    $this->log_info("PayPal order prices include tax: " . ($prices_include_tax ? 'Yes' : 'No'));
-
-    // Create the breakdown with proper tax handling
-    $breakdown = array();
+    // IMPORTANT: Use the client-provided values without recalculating
+    $this->log_info("Using client-provided values - Shipping: $shipping_cost, Tax: $tax_total, Total: $amount");
     
-    // Add item_total with tax-inclusive flag if needed
-    if ($prices_include_tax) {
-        $breakdown['item_total'] = array(
-            'currency_code' => $currency,
-            'value' => number_format($item_total, 2, '.', ''),
-            'includes_tax' => true
-        );
-    } else {
-        $breakdown['item_total'] = array(
+    // Create breakdown with client-provided values
+    $breakdown = array(
+        'item_total' => array(
             'currency_code' => $currency,
             'value' => number_format($item_total, 2, '.', '')
-        );
-    }
-    
-    // Add shipping
-    $breakdown['shipping'] = array(
-        'currency_code' => $currency,
-        'value' => number_format($shipping_total, 2, '.', '')
+        ),
+        'shipping' => array(
+            'currency_code' => $currency,
+            'value' => number_format($selected_shipping_cost, 2, '.', '')
+        ),
+        'tax_total' => array(
+            'currency_code' => $currency,
+            'value' => number_format($tax_total, 2, '.', '')
+        )
     );
     
-    // Add tax_total
-    $breakdown['tax_total'] = array(
-        'currency_code' => $currency,
-        'value' => number_format($tax_total, 2, '.', '')
-    );
-    
-    // Add discount if we have it
+    // Add discount and handling if they exist
     if ($discount > 0) {
         $breakdown['discount'] = array(
             'currency_code' => $currency,
             'value' => number_format($discount, 2, '.', '')
         );
-    } else {
-        $breakdown['discount'] = array(
+    }
+    
+    if ($handling > 0) {
+        $breakdown['handling'] = array(
             'currency_code' => $currency,
-            'value' => '0.00'
+            'value' => number_format($handling, 2, '.', '')
         );
     }
     
-    // Add handling
-    $breakdown['handling'] = array(
-        'currency_code' => $currency,
-        'value' => number_format($handling, 2, '.', '')
-    );
+    // Use the client-provided total amount - don't recalculate
+    $order_total = floatval($amount);
     
-    // Prepare the full purchase unit for the PATCH request
+    // Prepare the purchase unit for the PATCH request
     $purchase_unit = array(
         'amount' => array(
-            'value' => number_format(floatval($amount), 2, '.', ''),
+            'value' => number_format($order_total, 2, '.', ''),
             'currency_code' => $currency,
             'breakdown' => $breakdown
         ),

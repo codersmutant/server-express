@@ -80,9 +80,23 @@
                         
                         // Check if message is for us
                         var data = event.data;
-                        if (!data || !data.action || data.source !== 'woocommerce-site') {
-                            return;
-                        }
+    if (!data || !data.action || data.source !== 'woocommerce-site') {
+        return;
+    }
+    
+    if (data.action === 'order_creation_failed') {
+        clearTimeout(timeoutId);
+        window.removeEventListener('message', messageHandler);
+        
+        if (data.isValidationError) {
+            // For validation errors, display them and reject with a special error
+            reject(new Error('checkout_validation_failed'));
+        } else {
+            // For other errors, display the message
+            //showError(data.message || 'Order creation failed');
+            reject(new Error(data.message || 'Failed to create order'));
+        }
+    }
                         
                         // Handle create_paypal_order action
                         if (data.action === 'create_paypal_order') {

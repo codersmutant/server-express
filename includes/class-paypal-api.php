@@ -1250,13 +1250,73 @@ public function update_paypal_order_shipping($paypal_order_id, $shipping_option_
         );
     }
     
+    
+
+// Add handling
+$breakdown['handling'] = array(
+    'currency_code' => $currency,
+    'value' => number_format($handling_total, 2, '.', '')
+);
+
+$order_total = floatval($amount);
+
+// Calculate the sum of breakdown components
+$breakdown_sum = floatval($breakdown['item_total']['value']) + 
+                 floatval($breakdown['shipping']['value']) + 
+                 floatval($breakdown['tax_total']['value']);
+
+// Add discount if present
+if (isset($breakdown['discount'])) {
+    $breakdown_sum -= floatval($breakdown['discount']['value']);
+}
+
+// Add handling if present  
+if (isset($breakdown['handling'])) {
+    $breakdown_sum += floatval($breakdown['handling']['value']);
+    
+}
+
+$this->log_info("breakdown_sum: $breakdown_sum . order total . $order_total");
+
+// Check for mismatch (allowing 0.01 tolerance)
+$mismatch = round(   $order_total - $breakdown_sum, 2);
+
+if (abs($mismatch) > 0.001) {  // More than 0.01 difference
+    $this->log_info("Total mismatch detected: $mismatch. Adjusting item_total.");
+    
+    // Adjust item_total to match the order total
+    $new_tax_total = floatval($breakdown['tax_total']['value']) + $mismatch;
+    $breakdown['tax_total']['value'] = number_format($new_tax_total, 2, '.', '');
+    
+    $this->log_info("Adjusted tax_total from " . 
+                    $tax_total . " to " . 
+                    $breakdown['tax_total']['value']);
+}
+
+// Create the purchase unit for the PATCH request  
+$purchase_unit = array(
+    'amount' => array(
+        'value' => number_format($order_total, 2, '.', ''),
+        'currency_code' => $currency,
+        'breakdown' => $breakdown
+    ),
+    'reference_id' => $reference_id
+);
+
+
     // Use the client-provided total amount - don't recalculate
-    $order_total = floatval($amount);
+    
+    
+    // ADDITIONAL FIX: Ensure all numbers are properly rounded to 2 decimal places
+    $order_total = number_format($order_total, 2, '.', '');
+    $item_total = number_format($item_total, 2, '.', '');
+    $selected_shipping_cost = number_format($selected_shipping_cost, 2, '.', '');
+    $tax_total = number_format($tax_total, 2, '.', '');
     
     // Prepare the purchase unit for the PATCH request
     $purchase_unit = array(
         'amount' => array(
-            'value' => number_format($order_total, 2, '.', ''),
+            'value' => $order_total,
             'currency_code' => $currency,
             'breakdown' => $breakdown
         ),

@@ -113,10 +113,26 @@
                             window.removeEventListener('message', messageHandler);
                             
                             // Show error
-                            var error = new Error(data.message || 'Failed to create order');
-                            showError('Order creation failed: ' + error.message);
-                            reject(error);
-                        }
+                            //var error = new Error(data.message || 'Failed to create order');
+                            //showError('Order creation failed: ' + error.message);
+                             // Show the specific validation errors if provided
+                                if (data.errors) {
+                                    // Create a formatted error message from validation errors
+                                    var errorMessage = '';
+                                    for (var field in data.errors) {
+                                        errorMessage += data.errors[field] + '<br>';
+                                    }
+                                    showError('Please correct the following errors:<br>' + errorMessage);
+                                } else {
+                                    // Fallback to generic error message
+                                    showError('Order creation failed: ' + data.message);
+                                }
+                                
+                                // Use a special error message that onError will ignore
+                                reject(new Error('checkout_validation_failed'));
+                            }
+
+
                     };
                     
                     // Add message listener
@@ -190,10 +206,18 @@
             },
             
             // On error
+            
             onError: function(err) {
                 console.error('PayPal error:', err);
                 
-                // Notify parent window
+                // Check if this is a validation error and ignore it
+                if (err.message === 'checkout_validation_failed' || err.message === ' failed' || err.message === 'Validation failed' || err.message === 'Failed to create order') {
+                    // Don't show error message for validation failures
+                    // The specific errors are already being displayed
+                    return;
+                }
+                
+                // Notify parent window only for real PayPal errors
                 sendMessageToParent({
                     action: 'payment_error',
                     error: {
@@ -201,7 +225,7 @@
                     }
                 });
                 
-                showError('PayPal error: ' + (err.message || 'An error occurred'));
+                //showError('PayPal error: ' + (err.message || 'An error occurred'));
             }
         }).render('#paypal-buttons-container');
         

@@ -123,7 +123,7 @@
                 // On error
                 onError: function(err) {
                     console.error('PayPal error:', err);
-                    showError('PayPal error: ' + (err.message || 'An error occurred'));
+                    //showError('PayPal error: ' + (err.message || 'An error occurred'));
                 }
             }).render('#wppps-paypal-button-container');
         } catch (error) {

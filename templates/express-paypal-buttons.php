@@ -714,7 +714,7 @@ onShippingChange: function(data, actions) {
                 }
             });
             
-            showError('PayPal error: ' + (err.message || 'An error occurred'));
+            //showError('PayPal error: ' + (err.message || 'An error occurred'));
         }
     }).render('#paypal-express-button-container');
     

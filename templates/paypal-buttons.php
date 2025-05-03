@@ -183,7 +183,7 @@ $formatted_amount = number_format((float)$amount, 2, '.', ',');
     
     <?php if (!empty($client_id)) : ?>
     <!-- PayPal SDK -->
-<script src="https://www.paypal.com/sdk/js?client-id=<?php echo esc_attr($client_id); ?>&currency=<?php echo esc_attr($currency); ?>&intent=capture&components=buttons,hosted-fields"></script>
+<script src="https://www.paypal.com/sdk/js?client-id=<?php echo esc_attr($client_id); ?>&currency=<?php echo esc_attr($currency); ?>&intent=capture&components=buttons&disable-funding=sepa"></script>
     <?php endif; ?>
     
     <!-- Load custom script -->
@@ -399,7 +399,7 @@ $formatted_amount = number_format((float)$amount, 2, '.', ',');
                 }
             });
             
-            showError('PayPal error: ' + (err.message || 'An error occurred'));
+            //showError('PayPal error: ' + (err.message || 'An error occurred'));
         }
     }).render('#paypal-buttons-container');
     
